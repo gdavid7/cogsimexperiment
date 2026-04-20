@@ -1,0 +1,906 @@
+# Design Document: Cognitive Similarity
+
+## Overview
+
+The Cognitive Similarity system measures how similarly two stimuli would be processed by the human brain, using TRIBE v2 (Meta FAIR's tri-modal brain encoding foundation model) as the neural substrate. Rather than comparing stimuli by semantic embedding cosine similarity, this system grounds similarity in predicted whole-brain fMRI cortical activation patterns.
+
+The pipeline is:
+
+1. **Predict** — run each stimulus independently through TRIBE v2 to obtain a `Cortical_Response` tensor of shape `[T, 20,484]`
+2. **Collapse** — reduce the timeseries to a single spatial vector `[20,484]` (the `Collapsed_Response`) via peak extraction or GLM+HRF
+3. **Mask** — restrict the `Collapsed_Response` to vertices belonging to each of the five ICA networks
+4. **Score** — compute Pearson correlation between two `Collapsed_Responses` per network, producing a `Cognitive_Similarity_Profile`
+
+The system is designed to be used as a Python library. The primary entry point is `CognitiveSimilarity`, which wraps model loading, caching, and all similarity operations.
+
+### Key Design Decisions
+
+- **Cortical-only for similarity, both tensors cached**: TRIBE v2 has two separate model configurations: the default cortical model (`TribeModel.from_pretrained("facebook/tribev2")`) produces `(n_timesteps, 20,484)`, and a subcortical model (configured with `MaskProjector(mask="subcortical")`) produces `(n_timesteps, 8,802)`. These are separate `predict()` calls. Both tensors are stored in cache for future investigation — only the cortical tensor is used for similarity computation.
+- **Stimulus isolation via separate predict() calls**: Each stimulus is run through TRIBE v2 via its own independent `get_events_dataframe()` + `predict()` call. The TRIBE v2 API already enforces single-stimulus input (`get_events_dataframe()` accepts exactly one path). No manual silence padding is needed — `predict()` automatically discards empty segments (`remove_empty_segments=True` by default), so blank padding would be filtered out anyway. Isolation is achieved simply by never combining stimuli into a single call.
+- **Pairwise Pearson correlation**: Each stimulus is run through TRIBE v2 independently and its predicted activation pattern is collapsed to a `[20,484]` vector. Similarity between two stimuli is computed as Pearson correlation between their collapsed responses, restricted to the vertices of a given ICA network. This directly mirrors the spatial Pearson correlation used by the TRIBE v2 paper (sections 2.5, 2.6, 5.10) for comparing predicted maps against ground-truth maps — we apply the same metric to compare two predicted maps against each other.
+- **ICA network masks computed from model weights**: The five ICA network masks are derived by running FastICA on TRIBE v2's "unseen subject" projection layer — a `(2048, 20,484)` matrix embedded in `best.ckpt`. The 2,048 dimension is the `low_rank_head` bottleneck (confirmed in `config.yaml`: `low_rank_head: 2048`); the transformer hidden dimension is 1,152 but the subject layer operates on the low-rank projection. The HuggingFace repo contains only `best.ckpt` and `config.yaml` — no pre-computed mask files. At initialization, `ICANetworkAtlas` loads the model weights, extracts the unseen-subject layer, runs `sklearn.decomposition.FastICA(n_components=5)`, and thresholds each component at the top 10% of absolute values to produce binary vertex masks (~2,048 vertices each). This is a one-time computation cached locally.
+- **Content-addressed caching**: Both the `Collapsed_Response` and the raw `Brain_Response` timeseries are serialized to disk keyed by a hash of the stimulus input, avoiding redundant TRIBE v2 inference.
+
+---
+
+## Architecture
+
+```mermaid
+graph TD
+    subgraph COLAB["Google Colab Pro (A100 GPU)"]
+        A[IBC Stimuli<br/>images + audio + text] --> B[remote_inference.ipynb]
+        B --> C[TRIBE v2<br/>TribeModel.predict]
+        C --> D1[raw_cortical.npy<br/>T × 20484]
+        C --> D2[raw_subcortical.npy<br/>T × 8802]
+        D1 --> GD[(Google Drive Cache)]
+        D2 --> GD
+        A --> GD
+    end
+
+    subgraph LOCAL["Local Mac (no GPU required)"]
+        GD --> RC[ResponseCache]
+        RC --> TC[TemporalCollapser]
+        TC --> CR[collapsed.npy<br/>20484]
+        CR --> RC
+        RC --> SE[SimilarityEngine]
+        ICA[ICANetworkAtlas<br/>5 network masks] --> SE
+        GL[GlasserAtlas<br/>360 parcels] --> SE
+        SE --> P[Cognitive_Similarity_Profile<br/>5 network scores + whole-cortex]
+        P --> R[RankedSimilarity]
+        P --> V[ValidationSuite]
+        P --> DN[DemoNotebook]
+    end
+```
+
+### Deployment Split
+
+The system is split across two environments:
+
+| Environment | Components | Why |
+|---|---|---|
+| Google Colab Pro (A100 GPU) | `remote_inference.ipynb`, `StimulusRunner` | TRIBE v2 requires a GPU. Colab Pro (available via student plan) provides an A100, reducing inference time to ~5 minutes for the full IBC corpus. Colab's job is purely inference — run TRIBE v2, save raw tensors. |
+| Local Mac | `TemporalCollapser`, `ResponseCache`, `SimilarityEngine`, `ICANetworkAtlas`, `GlasserAtlas`, `CognitiveSimilarity`, `ValidationSuite`, `DemoNotebook` | All analysis logic runs locally. Collapsing is done locally so the strategy can be changed without re-running Colab. |
+
+The boundary between the two is the Google Drive cache directory. Once raw tensors are cached, all similarity computation runs entirely locally with no GPU needed.
+
+### Component Responsibilities
+
+| Component | Environment | Responsibility |
+|---|---|---|
+| `remote_inference.ipynb` | Colab | Clones repo, downloads IBC stimuli, runs TRIBE v2 inference, saves raw tensors to Google Drive with resume-from-checkpoint |
+| `StimulusRunner` | Colab | Calls TRIBE v2 API per stimulus, returns raw `Brain_Response` (cortical + subcortical) |
+| `TemporalCollapser` | Local | Reduces cortical `[T, 20,484]` → `[20,484]` via peak (≤10s) or GLM+HRF (>10s); result cached locally alongside raw tensors |
+| `ResponseCache` | Both | Colab writes raw tensors; local reads raw tensors and writes/reads collapsed responses |
+| `ICANetworkAtlas` | Local | Loads and exposes the five ICA network vertex masks (~2,048 vertices each) from HuggingFace |
+| `GlasserAtlas` | Local | Loads and exposes the 360-parcel Glasser parcellation vertex masks |
+| `SimilarityEngine` | Local | Computes per-network Pearson correlation, whole-cortex score, ranked lists |
+| `CognitiveSimilarity` | Local | Top-level facade: orchestrates all components, exposes public API |
+| `ValidationSuite` | Local | Runs 9 expected-ordering checks against cached IBC tensors |
+| `DemoNotebook` | Local | Interactive Jupyter notebook for exploring the system |
+
+---
+
+## Components and Interfaces
+
+### `CognitiveSimilarity` (public facade)
+
+```python
+class CognitiveSimilarity:
+    def __init__(
+        self,
+        model_id: str = "facebook/tribev2",
+        cache_dir: str | None = None,
+    ) -> None: ...
+
+    def compare(
+        self,
+        stimulus_a: Stimulus,
+        stimulus_b: Stimulus,
+        networks: list[ICANetwork] | None = None,  # None = all 5
+        ica_mode: ICAMode = ICAMode.BINARY_MASK,
+    ) -> SimilarityResult: ...
+
+    def rank(
+        self,
+        query: Stimulus,
+        corpus: list[Stimulus],
+        network: ICANetwork | None = None,  # None = all networks + whole cortex
+    ) -> RankedResult: ...
+
+    def get_collapsed_response(
+        self,
+        stimulus: Stimulus,
+    ) -> np.ndarray: ...  # shape [20,484]
+```
+
+### `remote_inference.ipynb` (Google Colab)
+
+This notebook is the entry point for all TRIBE v2 inference. It runs on Google Colab with a GPU runtime and writes results to Google Drive for local use.
+
+**Notebook structure:**
+
+```
+Cell 1 — Setup
+  - Mount Google Drive
+  - Clone/pull the git repo from GitHub
+  - pip install tribev2 + dependencies
+  - huggingface-cli login (for gated Llama 3.2 access)
+
+Cell 2 — Load models
+  - cortical_model = TribeModel.from_pretrained("facebook/tribev2", cache_folder=CACHE_FOLDER)
+  - subcortical_model = TribeModel.from_pretrained("facebook/tribev2", cache_folder=CACHE_FOLDER,
+      config_update={"data.neuro.projection": {"name": "MaskProjector", "mask": "subcortical", "=replace=": True}, "data.neuro.fwhm": 6.0})
+
+Cell 3 — Download IBC stimuli
+  - Clone https://github.com/individual-brain-charting/public_protocols
+  - Download FaceBody/Visu images and language clips
+  - Build stimulus manifest (list of all files to process)
+
+Cell 4 — Resume-from-checkpoint inference loop
+  - For each stimulus in manifest:
+      hash = content_hash(stimulus)
+      if (DRIVE_CACHE / "tensors" / hash / "raw_cortical.npy").exists(): continue  # skip
+      cortical_preds, _ = cortical_model.predict(events=df)    # (T, 20484)
+      subcortical_preds, _ = subcortical_model.predict(events=df)  # (T, 8802)
+      save raw_cortical.npy + raw_subcortical.npy to DRIVE_CACHE/tensors/hash/
+  - Print progress: X processed, Y skipped, Z remaining
+  - Note: TemporalCollapser runs locally — Colab only saves raw tensors
+
+Cell 5 — Verify cache
+  - List all cached stimuli with their shapes and sizes
+  - Confirm all expected stimuli are present
+```
+
+**Resume-from-checkpoint logic:**
+
+Each stimulus is identified by a SHA-256 hash of its file contents. Before running inference, the notebook checks whether `tensors/<hash>/raw_cortical.npy` already exists in the Google Drive cache directory. If it does, the stimulus is skipped. This means:
+- Colab timeouts are safe — re-running the notebook picks up exactly where it left off
+- Re-running after adding new stimuli only processes the new ones
+- The cache is the single source of truth
+
+**Data volumes:**
+- IBC corpus: ~100-150 images + ~30-40 audio/language clips (no local copies — referenced via GitHub URLs)
+- Raw cortical tensors (Colab writes): ~60 MB total
+- Raw subcortical tensors (Colab writes): ~20 MB total
+- Collapsed tensors (local, generated on first use): ~15 MB total
+- Total cache: ~95 MB — well within Google Drive free 15 GB
+- Estimated inference time on Colab Pro A100: ~5 minutes for full corpus
+
+**Google Drive path structure:**
+```
+MyDrive/
+└── cognitive-similarity-cache/
+    ├── manifest.json          # stimulus registry (see below)
+    └── tensors/
+        ├── <sha256_hash_1>/
+        │   ├── raw_cortical.npy      # (T, 20484) float32 — written by Colab
+        │   └── raw_subcortical.npy   # (T, 8802) float32  — written by Colab
+        ├── <sha256_hash_2>/
+        │   ├── raw_cortical.npy
+        │   └── raw_subcortical.npy
+        └── ...
+```
+
+No stimulus files are stored in the cache. Images are fetched on-the-fly from stable `raw.githubusercontent.com` URLs when needed by the demo notebook. GitHub's raw content CDN has generous rate limits — 150 image requests for our full corpus is well within bounds even unauthenticated.
+
+After syncing to local Mac, `ResponseCache` adds `collapsed.npy` on first use:
+```
+tensors/<sha256_hash_1>/
+├── raw_cortical.npy      # from Colab
+├── raw_subcortical.npy   # from Colab
+└── collapsed.npy         # generated locally by TemporalCollapser, cached
+```
+
+**`manifest.json` structure:**
+```json
+[
+  {
+    "stimulus_id": "face_01",
+    "category": "face",
+    "modality": "image",
+    "github_url": "https://raw.githubusercontent.com/individual-brain-charting/public_protocols/master/FaceBody/stimuli/adult/image_001.jpg",
+    "local_path": null,
+    "content_hash": "a3f2c1...",
+    "tensor_dir": "tensors/a3f2c1..."
+  },
+  {
+    "stimulus_id": "speech_segment_01",
+    "category": "speech",
+    "modality": "audio",
+    "github_url": "https://raw.githubusercontent.com/individual-brain-charting/public_protocols/master/...",
+    "local_path": null,
+    "content_hash": "b7e4d2...",
+    "tensor_dir": "tensors/b7e4d2..."
+  }
+]
+```
+
+### `StimulusRunner`
+
+```python
+class StimulusRunner:
+    def __init__(
+        self,
+        cortical_model: TribeModel,    # default facebook/tribev2
+        subcortical_model: TribeModel, # configured with MaskProjector(mask="subcortical")
+    ) -> None: ...
+
+    def run(self, stimulus: Stimulus) -> BrainResponse:
+        """
+        Runs the stimulus through both the cortical and subcortical models
+        independently. Each is a separate get_events_dataframe() + predict() call.
+
+        Cortical model: TribeModel.from_pretrained("facebook/tribev2")
+          → preds shape (n_timesteps, 20484)
+        Subcortical model: configured with MaskProjector(mask="subcortical")
+          → preds shape (n_timesteps, 8802)
+
+        Isolation is achieved by separate predict() calls per stimulus —
+        the TRIBE v2 API enforces single-stimulus input (get_events_dataframe
+        accepts exactly one path), and predict() discards empty segments by
+        default, so stimuli never contaminate each other.
+        """
+```
+
+Note: `get_events_dataframe()` accepts exactly one of `video_path`, `audio_path`, or `text_path`. For multimodal input (e.g. video with transcript), pass the video file — TRIBE v2 extracts audio and transcribes internally.
+
+### `TemporalCollapser`
+
+```python
+class TemporalCollapser:
+    def collapse(
+        self,
+        cortical_response: np.ndarray,  # shape (T, 20484)
+        stimulus: Stimulus,             # duration_s read from here; inferred from T if None
+        strategy: CollapsingStrategy = CollapsingStrategy.AUTO,
+        tr_s: float = 1.0,  # TRIBE v2 TR
+    ) -> tuple[np.ndarray, CollapsingStrategy]:
+        """
+        Returns (collapsed_response [20484], strategy_used).
+        Duration is taken from stimulus.duration_s; if None, inferred as T * tr_s.
+        AUTO: peak if duration <= 10s, GLM+HRF if duration > 10s.
+        """
+```
+
+**Peak extraction**: index into the response at `t + 5s` after stimulus onset (the hemodynamic peak per paper section 5.9). If that timepoint is unavailable, fall back to the last available timepoint and log a warning.
+
+**GLM+HRF**: uses `nilearn.glm.first_level.make_first_level_design_matrix` to build an HRF-convolved design matrix, then solves the GLM via `numpy.linalg.lstsq` applied directly to the `(T, 20,484)` cortical surface array. The beta coefficient for the stimulus regressor (shape `[20,484]`) is the `Collapsed_Response`. This approach is used because `nilearn.FirstLevelModel.fit()` expects a NIfTI image, not a raw numpy array.
+
+### `ICANetworkAtlas`
+
+```python
+class ICANetworkAtlas:
+    NETWORKS = [
+        ICANetwork.PRIMARY_AUDITORY_CORTEX,
+        ICANetwork.LANGUAGE_NETWORK,
+        ICANetwork.MOTION_DETECTION_MT_PLUS,
+        ICANetwork.DEFAULT_MODE_NETWORK,
+        ICANetwork.VISUAL_SYSTEM,
+    ]
+
+    def __init__(
+        self,
+        model_id: str = "facebook/tribev2",
+        top_percentile: float = 0.10,  # top 10% of vertices per component
+        cache_dir: str | None = None,  # cache computed masks to avoid recomputing
+    ) -> None:
+        """
+        Loads best.ckpt from HuggingFace, extracts the unseen-subject
+        projection layer (shape 2048 × 20484, where 2048 = low_rank_head
+        bottleneck per config.yaml), runs FastICA(n_components=5),
+        and thresholds each component at top_percentile to produce binary masks.
+        Computed masks are cached locally so this only runs once.
+        """
+
+    def get_mask(self, network: ICANetwork) -> np.ndarray:
+        """Returns boolean array of shape [20484] for the given network.
+        Binary mask: top 10% of vertices by absolute ICA component value."""
+
+    def get_vertex_indices(self, network: ICANetwork) -> np.ndarray:
+        """Returns integer index array (~2048 vertices) for the given network."""
+
+    def get_component(self, network: ICANetwork) -> np.ndarray:
+        """Returns the full continuous ICA component vector of shape [20484].
+        Values represent each vertex's association strength with this network.
+        Used for continuous weighting mode in SimilarityEngine."""
+```
+
+The ICA components are continuous vectors over all 20,484 vertices. Two modes are supported:
+- **Binary mask mode** (default): top 10% threshold (~2,048 vertices), consistent with Figure 6A visualization in the paper.
+- **Continuous weighting mode**: full component vector used as per-vertex weights — vertices with stronger network association contribute more to the similarity score, preserving all information from the ICA decomposition.
+
+Masks are not mutually exclusive — a vertex can appear in multiple network masks. All 20,484 vertices contribute to whole-cortex and Glasser parcel queries regardless of mask membership.
+
+### `GlasserAtlas`
+
+```python
+class GlasserAtlas:
+    def __init__(self) -> None:
+        """Loads Glasser 360-parcel parcellation."""
+
+    def get_vertex_indices(self, parcel_id: int) -> np.ndarray:
+        """Returns vertex indices for parcel 1–360."""
+
+    def list_parcels(self) -> list[int]: ...
+```
+
+### `SimilarityEngine`
+
+```python
+class SimilarityEngine:
+    def __init__(
+        self,
+        ica_atlas: ICANetworkAtlas,
+        glasser_atlas: GlasserAtlas,
+        ica_mode: ICAMode = ICAMode.BINARY_MASK,    # default: top 10% binary mask
+    ) -> None: ...
+
+    def compute_profile(
+        self,
+        response_a: np.ndarray,  # [20484]
+        response_b: np.ndarray,  # [20484]
+        ica_mode: ICAMode | None = None,  # overrides instance default if provided
+    ) -> CognitiveSimilarityProfile: ...
+
+    def compute_network_score(
+        self,
+        response_a: np.ndarray,
+        response_b: np.ndarray,
+        network: ICANetwork,
+        ica_mode: ICAMode | None = None,
+    ) -> float: ...
+
+    def compute_glasser_score(
+        self,
+        response_a: np.ndarray,
+        response_b: np.ndarray,
+        parcel_id: int,
+    ) -> float: ...
+```
+
+In **binary mask mode**: restricts both responses to the ~2,048 top-10% vertices, then computes Pearson correlation over those vertices equally.
+
+In **continuous weighting mode**: uses the full ICA component vector (all 20,484 values, normalized to sum to 1 by absolute value) as per-vertex weights before computing Pearson correlation — vertices with stronger network association contribute more to the similarity score.
+
+### `ResponseCache`
+
+```python
+class ResponseCache:
+    def __init__(self, cache_dir: str) -> None: ...
+
+    def get_collapsed(self, stimulus: Stimulus) -> np.ndarray | None:
+        """Returns cached Collapsed_Response [20484] or None."""
+
+    def get_raw(self, stimulus: Stimulus) -> tuple[np.ndarray, np.ndarray] | None:
+        """Returns (raw_cortical, raw_subcortical) or None."""
+
+    def put_raw(
+        self,
+        stimulus: Stimulus,
+        raw_cortical: np.ndarray,    # (n_timesteps, 20484) float32 — written by Colab
+        raw_subcortical: np.ndarray, # (n_timesteps, 8802) float32  — written by Colab
+    ) -> None:
+        """Saves raw tensors to <cache_dir>/tensors/<content_hash>/raw_*.npy"""
+
+    def put_collapsed(
+        self,
+        stimulus: Stimulus,
+        collapsed: np.ndarray,       # [20484] float32 — computed locally
+    ) -> None:
+        """Saves collapsed response to <cache_dir>/<content_hash>/collapsed.npy"""
+
+    def _content_hash(self, stimulus: Stimulus) -> str:
+        """SHA-256 of the raw bytes of all modality inputs."""
+```
+
+Serialization uses `numpy.save()` / `numpy.load()` with `.npy` format, which preserves float32 precision exactly. Both tensors are stored together under a per-stimulus subdirectory keyed by content hash.
+
+### `ValidationSuite`
+
+```python
+class ValidationSuite:
+    def __init__(
+        self,
+        system: CognitiveSimilarity,
+        cache: ResponseCache,      # provides collapsed responses for IBC stimuli
+        manifest_path: str,        # path to manifest.json (contains GitHub URLs + hashes)
+    ) -> None: ...
+
+    def run(self) -> ValidationReport: ...
+```
+
+Runs 9 expected-ordering checks (see Requirement 7). Loads stimuli by looking up their content hashes in `manifest.json`, retrieves their `Collapsed_Response` from `ResponseCache`, then computes and compares similarity scores. Reports pass/fail per check and a summary count.
+
+---
+
+## Data Models
+
+```python
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Optional
+import numpy as np
+
+
+class ICANetwork(Enum):
+    PRIMARY_AUDITORY_CORTEX = "primary_auditory_cortex"
+    LANGUAGE_NETWORK = "language_network"
+    MOTION_DETECTION_MT_PLUS = "motion_detection_mt_plus"
+    DEFAULT_MODE_NETWORK = "default_mode_network"
+    VISUAL_SYSTEM = "visual_system"
+
+
+class ICAMode(Enum):
+    BINARY_MASK = "binary_mask"        # top 10% vertices, equal weight (default)
+    CONTINUOUS_WEIGHTS = "continuous"  # full component vector as per-vertex weights
+
+
+class CollapsingStrategy(Enum):
+    AUTO = "auto"
+    PEAK = "peak"
+    GLM_HRF = "glm_hrf"
+
+
+@dataclass
+class BrainResponse:
+    """Raw output from StimulusRunner — both model runs preserved for future use."""
+    cortical: np.ndarray        # shape (n_timesteps, 20484) float32 — from cortical model
+    subcortical: np.ndarray     # shape (n_timesteps, 8802) float32  — from subcortical model
+    segments: list              # TRIBE v2 segment objects aligned with cortical
+
+
+@dataclass
+class Stimulus:
+    video_path: Optional[str] = None
+    audio_path: Optional[str] = None
+    text_path: Optional[str] = None
+    duration_s: Optional[float] = None  # if None, inferred from media
+    stimulus_id: Optional[str] = None   # for ranking output; auto-generated if None
+
+    def validate(self) -> None:
+        """Raises ValueError if no modality is provided."""
+
+
+@dataclass
+class NetworkScore:
+    network: ICANetwork
+    score: float                  # Pearson r in [-1, 1]
+    vertex_count: int             # ~2048 for binary mask, 20484 for continuous
+    ica_mode: ICAMode             # which ICA mode was used
+    warning: Optional[str] = None  # e.g., "zero variance"
+
+
+@dataclass
+class CognitiveSimilarityProfile:
+    network_scores: dict[ICANetwork, NetworkScore]
+    whole_cortex_score: float     # vertex-count-weighted average of 5 network scores
+    ica_mode: ICAMode             # which ICA mode was used
+
+
+@dataclass
+class SimilarityResult:
+    profile: CognitiveSimilarityProfile
+    stimulus_a_id: str
+    stimulus_b_id: str
+    collapsing_strategy_a: CollapsingStrategy
+    collapsing_strategy_b: CollapsingStrategy
+    metadata: dict = field(default_factory=dict)
+
+@dataclass
+class RankedEntry:
+    stimulus_id: str
+    score: float
+    rank: int                     # 1 = most similar; ties share rank
+
+
+@dataclass
+class RankedResult:
+    query_id: str
+    rankings_by_network: dict[ICANetwork, list[RankedEntry]]
+    rankings_whole_cortex: list[RankedEntry]
+
+
+@dataclass
+class ValidationCheck:
+    description: str
+    network: ICANetwork
+    pair_a: tuple[str, str]       # (stimulus_id_1, stimulus_id_2)
+    pair_b: tuple[str, str]
+    expected: str                 # "sim(pair_a) > sim(pair_b)"
+    passed: bool
+    score_a: float
+    score_b: float
+
+
+@dataclass
+class ValidationReport:
+    checks: list[ValidationCheck]
+    passed: int
+    total: int
+```
+
+---
+
+## Key Algorithms
+
+### Temporal Collapsing — Peak Extraction
+
+```
+tr_s = 1.0  # TRIBE v2 TR (seconds per timepoint)
+peak_offset_s = 5.0
+peak_idx = round((stimulus_onset_s + peak_offset_s) / tr_s)
+if peak_idx >= T:
+    peak_idx = T - 1
+    log.warning("Peak timepoint unavailable; using last timepoint")
+collapsed = cortical_response[peak_idx]  # shape [20484]
+```
+
+### Temporal Collapsing — GLM+HRF
+
+`nilearn.FirstLevelModel.fit()` expects a NIfTI image, not a raw numpy array. For our surface data `(T, 20484)`, we use `make_first_level_design_matrix` to build the design matrix and solve the GLM directly with numpy least squares:
+
+```python
+from nilearn.glm.first_level import make_first_level_design_matrix
+import pandas as pd
+import numpy as np
+
+# Build design matrix with HRF-convolved stimulus regressor
+frame_times = np.arange(T) * tr_s  # timepoints in seconds
+events = pd.DataFrame({
+    "onset": [0.0],
+    "duration": [stimulus_duration_s],
+    "trial_type": ["stimulus"],
+})
+design_matrix = make_first_level_design_matrix(
+    frame_times,
+    events=events,
+    hrf_model="spm",
+    drift_model=None,
+)
+
+# Solve GLM: Y = X @ beta, beta = (X'X)^-1 X'Y
+X = design_matrix.values  # shape (T, n_regressors)
+Y = cortical_response      # shape (T, 20484)
+beta, _, _, _ = np.linalg.lstsq(X, Y, rcond=None)
+collapsed = beta[0]        # first regressor = stimulus; shape (20484,)
+```
+
+### Pearson Correlation
+
+```python
+def pearson_correlation(a: np.ndarray, b: np.ndarray) -> float:
+    """
+    Mean-centered dot product normalized by norms.
+    Returns 0.0 if either vector has zero variance.
+    """
+    a_c = a - a.mean()
+    b_c = b - b.mean()
+    norm_a = np.linalg.norm(a_c)
+    norm_b = np.linalg.norm(b_c)
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return float(np.dot(a_c, b_c) / (norm_a * norm_b))
+```
+
+### Continuous ICA Weighting
+
+When `ica_mode=ICAMode.CONTINUOUS_WEIGHTS`, the full ICA component vector is used as per-vertex weights:
+
+```python
+w = np.abs(ica_atlas.get_component(network))  # shape [20484], absolute values
+w = w / w.sum()                                # normalize to sum to 1
+a_w = response_a * np.sqrt(w)
+b_w = response_b * np.sqrt(w)
+score = pearson_correlation(a_w, b_w)
+```
+
+This uses all 20,484 vertices, with vertices having stronger ICA component association contributing more to the similarity score.
+
+### Whole-Cortex Score
+
+```python
+total_vertices = sum(ns.vertex_count for ns in profile.network_scores.values())
+whole_cortex_score = sum(
+    ns.score * ns.vertex_count / total_vertices
+    for ns in profile.network_scores.values()
+)
+```
+
+### Content-Addressed Cache Key
+
+```python
+import hashlib
+
+def content_hash(stimulus: Stimulus) -> str:
+    h = hashlib.sha256()
+    for path in [stimulus.video_path, stimulus.audio_path, stimulus.text_path]:
+        if path is not None:
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    h.update(chunk)
+    return h.hexdigest()
+```
+
+### Ranking with Tie Handling
+
+```python
+def rank_entries(entries: list[tuple[str, float]]) -> list[RankedEntry]:
+    sorted_entries = sorted(entries, key=lambda x: x[1], reverse=True)
+    result = []
+    rank = 1
+    for i, (sid, score) in enumerate(sorted_entries):
+        if i > 0 and score < sorted_entries[i - 1][1]:
+            rank = i + 1
+        result.append(RankedEntry(stimulus_id=sid, score=score, rank=rank))
+    return result
+```
+
+---
+
+## Demo Notebook
+
+A local Jupyter notebook (`demo.ipynb`) is included as an interactive runthrough after the library classes are built. It runs entirely locally — no GPU required — since all tensors are already cached from the Colab inference step.
+
+### Notebook Structure
+
+1. **Setup** — point to the local cache directory (synced from Google Drive), load `CognitiveSimilarity`
+2. **Single comparison** — compare two IBC stimuli (e.g. a face image vs. a place image), print the `Cognitive_Similarity_Profile` with per-network scores
+3. **Ranked similarity** — given a query stimulus and the full IBC corpus, show the ranked lists per network as a table
+4. **Per-network bar chart** — visualize the 5 network scores for a pair of stimuli side-by-side
+5. **Validation suite** — run the 9 expected-ordering checks and display pass/fail results
+6. **Cache inspection** — show all cached stimuli, their sizes, and confirm round-trip serialization
+
+---
+
+## Error Handling
+
+| Condition | Behavior |
+|---|---|
+| Stimulus has no modality (no video, audio, or text) | Raise `ValueError` with descriptive message |
+| Peak timepoint unavailable (stimulus too short) | Fall back to last timepoint; log `WARNING` |
+| Zero-variance `Collapsed_Response` in a network | Return score `0.0`; set `NetworkScore.warning` |
+| Unknown ROI name (not a valid Glasser parcel or ICA network) | Raise `ValueError` listing valid identifiers |
+| Corpus has fewer than 2 stimuli for ranking | Raise `ValueError` |
+| Cache file corrupted or wrong shape | Log `WARNING`, re-run inference, overwrite cache |
+| TRIBE v2 model unavailable (network error) | Propagate `OSError` / `huggingface_hub` exception with context |
+
+---
+
+## Testing Strategy
+
+### Unit Tests
+
+- `TemporalCollapser`: test peak extraction at exact t+5s, fallback behavior, GLM+HRF output shape
+- `SimilarityEngine`: test Pearson correlation with known vectors, zero-variance handling, whole-cortex weighted average, binary mask vs continuous weighting modes produce different results
+- `ResponseCache`: test round-trip serialization, cache hit/miss, content hash collision resistance
+- `ICANetworkAtlas`: test that FastICA produces 5 components from the unseen-subject layer; test mask shapes (boolean, length 20,484); test vertex count ~2,048 per network (top 10%); test vertex indices are valid (0–20,483); note masks are NOT mutually exclusive — do not assert zero overlap
+- `Stimulus.validate()`: test all-None modality rejection
+- `rank_entries()`: test ordering, tie handling, single-element corpus rejection
+
+### Integration Tests
+
+- End-to-end `CognitiveSimilarity.compare()` with mock TRIBE v2 responses
+- Cache population and retrieval across two `compare()` calls for the same stimulus
+- `ValidationSuite` against IBC stimuli (requires network access and model weights)
+
+
+---
+
+## Correctness Properties
+
+*A property is a characteristic or behavior that should hold true across all valid executions of a system — essentially, a formal statement about what the system should do. Properties serve as the bridge between human-readable specifications and machine-verifiable correctness guarantees.*
+
+### Property 1: Stimulus Isolation — One Inference Per Stimulus
+
+*For any* list of N valid stimuli (N ≥ 1), the system SHALL invoke `model.predict()` exactly N times — once per stimulus — never combining multiple stimuli into a single inference call.
+
+**Validates: Requirements 1.4**
+
+---
+
+### Property 2: Invalid Stimulus Rejection
+
+*For any* `Stimulus` object where all of `video_path`, `audio_path`, and `text_path` are `None`, calling `Stimulus.validate()` SHALL raise a `ValueError` with a descriptive message.
+
+**Validates: Requirements 1.6**
+
+---
+
+### Property 3: Temporal Collapsing Strategy Selection and Output Shape
+
+*For any* `Cortical_Response` tensor of shape `(T, 20484)` with any `T ≥ 1`, the `TemporalCollapser` SHALL:
+- Select `CollapsingStrategy.PEAK` when `stimulus.duration_s ≤ 10.0` (or when duration inferred as `T * tr_s ≤ 10.0`)
+- Select `CollapsingStrategy.GLM_HRF` when `stimulus.duration_s > 10.0` (or inferred duration `> 10.0`)
+- Always produce a `Collapsed_Response` of shape `(20484,)` regardless of `T` or duration
+
+**Validates: Requirements 2.1, 2.2, 2.3**
+
+---
+
+### Property 4: Peak Extraction Correctness
+
+*For any* `Cortical_Response` tensor of shape `(T, 20484)` where `T > round(5.0 / tr_s)`, the peak-extracted `Collapsed_Response` SHALL equal `cortical_response[round(5.0 / tr_s)]` exactly.
+
+**Validates: Requirements 2.1**
+
+---
+
+### Property 5: ICA Network Masking Isolation
+
+*For any* of the five `ICANetwork` values, when computing a per-network similarity score, the system SHALL use only the vertex indices belonging to that network's mask — no vertices outside the mask shall contribute to the score.
+
+**Validates: Requirements 3.3, 3.5**
+
+---
+
+### Property 6: Glasser Parcel Masking Isolation
+
+*For any* valid Glasser parcel ID in `[1, 360]`, when computing a parcel-level similarity score, the system SHALL use only the vertex indices belonging to that parcel — no vertices outside the parcel shall contribute to the score.
+
+**Validates: Requirements 3.4, 6.1, 6.2**
+
+---
+
+### Property 7: Invalid ROI Rejection
+
+*For any* string or integer that does not correspond to a valid `ICANetwork` enum value or a valid Glasser parcel ID (1–360), the system SHALL raise a `ValueError` that lists valid identifiers.
+
+**Validates: Requirements 3.6, 6.3**
+
+---
+
+### Property 8: Continuous ICA Weight Normalization
+
+*For any* ICA component vector and *for any* `ICAMode.CONTINUOUS_WEIGHTS` computation, the absolute ICA component values used as weights SHALL sum to `1.0` (within float32 precision) after normalization.
+
+**Validates: Requirements 3.2**
+
+---
+
+### Property 9: Cognitive Similarity Profile Structure and Score Range
+
+*For any* two `Collapsed_Response` vectors of shape `(20484,)`, the resulting `CognitiveSimilarityProfile` SHALL contain exactly five `NetworkScore` entries (one per `ICANetwork` enum value), and every score SHALL be in the range `[-1.0, 1.0]`.
+
+**Validates: Requirements 5.1, 5.2**
+
+---
+
+### Property 10: Whole-Cortex Score Is Vertex-Count-Weighted Average
+
+*For any* `CognitiveSimilarityProfile`, the `whole_cortex_score` SHALL equal the vertex-count-weighted average of the five per-network scores:
+
+```
+whole_cortex_score = sum(ns.score * ns.vertex_count for ns in scores) / sum(ns.vertex_count for ns in scores)
+```
+
+**Validates: Requirements 5.4**
+
+---
+
+### Property 11: Similarity Result Structural Completeness
+
+*For any* `SimilarityResult`, all of the following fields SHALL be populated and non-null: `profile` (with 5 network scores each having `vertex_count > 0`), `whole_cortex_score`, `collapsing_strategy_a`, `collapsing_strategy_b`, and `ica_mode`.
+
+**Validates: Requirements 3.9, 4.5**
+
+---
+
+### Property 12: Batch Result Ordering
+
+*For any* query stimulus and list of N stimuli (N ≥ 1), the batch `compare()` call SHALL return exactly N `SimilarityResult` objects in the same order as the input list.
+
+**Validates: Requirements 5.7**
+
+---
+
+### Property 13: Collapsed Response Serialization Round-Trip
+
+*For any* valid `Collapsed_Response` (float32 array of shape `(20484,)`), serializing to a `.npy` file and then deserializing SHALL produce an array that is element-wise identical to the original (`numpy.array_equal` returns `True`).
+
+**Validates: Requirements 8.1, 8.2, 8.3**
+
+---
+
+### Property 14: Content Hash Determinism and Uniqueness
+
+*For any* `Stimulus`, `content_hash(stimulus)` SHALL return the same value on every call (determinism). *For any* two `Stimulus` objects with different modality file contents, their content hashes SHALL differ (collision resistance for distinct inputs).
+
+**Validates: Requirements 8.4**
+
+---
+
+### Property 15: Cache Hit Avoids Re-Inference
+
+*For any* `Stimulus` that has already been processed (its `Collapsed_Response` is in the cache), a subsequent call to `get_collapsed_response()` SHALL NOT invoke `model.predict()` again.
+
+**Validates: Requirements 8.5**
+
+---
+
+### Property 16: JSON Output Contains All Required Fields
+
+*For any* `SimilarityResult`, the JSON-formatted output SHALL contain all metadata fields specified in Requirement 4: per-network scores, whole-cortex score, temporal collapsing methods, vertex counts per network, and ICA mode used.
+
+**Validates: Requirements 7.6**
+
+---
+
+### Property 17: Ranked List Is Sorted in Descending Order
+
+*For any* query stimulus and corpus of N ≥ 2 stimuli, each ranked list (per-network and whole-cortex) SHALL be sorted in descending order of `Cognitive_Similarity_Score` (most similar first).
+
+**Validates: Requirements 9.1**
+
+---
+
+### Property 18: Tie Handling — Equal Scores Share Rank
+
+*For any* ranked list where two or more entries have equal `Cognitive_Similarity_Score` values, those entries SHALL be assigned the same `rank` value.
+
+**Validates: Requirements 9.5**
+
+---
+
+## Testing Strategy
+
+### Dual Testing Approach
+
+Unit tests cover specific examples, edge cases, and error conditions. Property-based tests verify universal properties across all inputs. Both are necessary for comprehensive coverage.
+
+### Property-Based Testing Library
+
+Use **[Hypothesis](https://hypothesis.readthedocs.io/)** for Python property-based testing. Each property test runs a minimum of 100 iterations.
+
+Tag format for each property test:
+```python
+# Feature: cognitive-similarity, Property N: <property_text>
+@given(...)
+@settings(max_examples=100)
+def test_property_N_...(...)
+```
+
+### Property Test Implementations
+
+Each of the 18 correctness properties above maps to a single Hypothesis property test:
+
+- **P1** — `@given(st.lists(stimulus_strategy(), min_size=1))` — mock TRIBE v2, count `predict()` calls
+- **P2** — `@given(st.just(Stimulus()))` — verify `ValueError` raised
+- **P3** — `@given(cortical_response_strategy(), st.floats(0.1, 60.0))` — verify strategy selection and output shape
+- **P4** — `@given(cortical_response_strategy(min_T=6))` — verify peak index correctness
+- **P5** — `@given(st.sampled_from(ICANetwork), collapsed_response_pair_strategy())` — verify vertex isolation
+- **P6** — `@given(st.integers(1, 360), collapsed_response_pair_strategy())` — verify parcel isolation
+- **P7** — `@given(invalid_roi_strategy())` — verify `ValueError` with valid identifiers listed
+- **P8** — `@given(ica_component_strategy(), st.just(ICAMode.CONTINUOUS_WEIGHTS))` — verify weights sum to 1.0
+- **P9** — `@given(collapsed_response_pair_strategy())` — verify 5 scores, all in [-1, 1]
+- **P10** — `@given(collapsed_response_pair_strategy())` — verify weighted average formula
+- **P11** — `@given(collapsed_response_pair_strategy())` — verify all fields populated
+- **P12** — `@given(collapsed_response_strategy(), st.lists(collapsed_response_strategy(), min_size=1))` — verify N results in order
+- **P13** — `@given(collapsed_response_strategy())` — verify numpy round-trip equality
+- **P14** — `@given(stimulus_strategy())` — verify hash determinism; `@given(two_distinct_stimuli_strategy())` — verify hash uniqueness
+- **P15** — `@given(stimulus_strategy())` — mock TRIBE v2, verify `predict()` not called on second access
+- **P16** — `@given(similarity_result_strategy())` — verify JSON contains all required keys
+- **P17** — `@given(collapsed_response_strategy(), st.lists(collapsed_response_strategy(), min_size=2))` — verify descending sort
+- **P18** — `@given(scores_with_ties_strategy())` — verify tied entries share rank
+
+### Unit Tests
+
+Focus on specific examples and edge cases not covered by property tests:
+
+- `TemporalCollapser`: peak fallback when T < peak_idx (logs warning, uses last timepoint)
+- `SimilarityEngine`: zero-variance vector → score 0.0 with warning in `NetworkScore`
+- `CognitiveSimilarity.rank()`: corpus with fewer than 2 stimuli → `ValueError`
+- `ICANetworkAtlas`: verify each network has ~2,048 vertices (top 10% of 20,484)
+- `GlasserAtlas`: verify parcel IDs 1–360 all resolve to non-empty vertex sets
+- `CollapsingStrategy.AUTO` is the default parameter value
+- Single-network query returns a single `Cognitive_Similarity_Score`
+- Binary mask mode and continuous weighting mode produce different scores for the same stimulus pair
+
+### Integration Tests
+
+- End-to-end `CognitiveSimilarity.compare()` with mocked TRIBE v2 responses (verifies full pipeline)
+- Cache population and retrieval: two `compare()` calls for the same stimulus, verify `predict()` called only once
+- `ValidationSuite` against real IBC stimuli with real TRIBE v2 model (requires network access and GPU) — 9 expected orderings, each run once
+
+### Validation Suite
+
+The `ValidationSuite` runs 9 integration checks against IBC stimuli (see Requirement 7). These are not property tests — each check is a single execution verifying a specific neuroscientific ordering. The suite reports pass/fail per check and a summary count. These checks serve as the system's acceptance test against known ground truths from the TRIBE v2 paper.
