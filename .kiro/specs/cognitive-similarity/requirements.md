@@ -38,8 +38,7 @@ Semantic similarity — as produced by language embedding models — captures wh
 - **Cognitive_Similarity_Profile**: The primary output of the system — a structured result containing one Pearson correlation similarity score per ICA_Network (5 scores total), plus a derived whole-cortex summary score. This replaces a single scalar with a cognitively interpretable vector, revealing *which* perceptual/cognitive dimensions drive similarity between two stimuli.
 - **Cognitive_Similarity_Score**: A scalar value in `[-1, 1]` representing similarity within a single ICA_Network or across the whole cortex, computed as Pearson correlation between two Collapsed_Responses restricted to that region's vertices. Pearson correlation is preferred over cosine similarity because it is mean-centered, making it robust to differences in overall activation magnitude between stimuli. This is the same metric used by the TRIBE v2 paper for spatial map comparison.
 - **Whole_Cortex_Score**: A derived summary scalar computed as the average of the five ICA_Network scores, weighted by the number of vertices in each network. Provided for convenience but secondary to the per-network profile.
-- **ROI**: A Region of Interest — a subset of the 20,484 cortical dimensions selected for targeted similarity computation. ROIs may be defined by the Glasser 360-parcel parcellation or by the five canonical ICA networks identified in the TRIBE v2 paper.
-- **Glasser_Parcellation**: The Glasser 360-parcel cortical atlas used in the TRIBE v2 paper for region-level analysis, covering the 20,484 cortical vertices.
+- **ROI**: A Region of Interest — a subset of the 20,484 cortical dimensions selected for targeted similarity computation. ROIs are defined by the five canonical ICA networks identified in the TRIBE v2 paper.
 - **ICA_Network**: One of the five canonical brain networks identified via ICA on TRIBE v2's final layer: (1) Primary Auditory Cortex, (2) Language Network, (3) Motion Detection (MT+), (4) Default Mode Network (DMN), (5) Visual System. These networks are the primary unit of analysis for cognitive similarity.
 - **Cortical_Vertex**: One of the 20,484 spatial dimensions in fsaverage5 space corresponding to the cortical surface.
 - **Subcortical_Voxel**: One of the 8,802 spatial dimensions corresponding to subcortical brain structures (not used in similarity computation).
@@ -94,10 +93,9 @@ Semantic similarity — as produced by language embedding models — captures wh
 3. THE System SHALL expose the ICA similarity mode as a configurable parameter, defaulting to binary mask mode.
 4. THE System SHALL support whole-cortex similarity using all 20,484 dimensions of the Collapsed_Response.
 5. THE System SHALL support ICA_Network-masked similarity using any of the five canonical ICA networks: Primary Auditory Cortex, Language Network, Motion Detection (MT+), Default Mode Network, or Visual System.
-6. THE System SHALL support ROI-masked similarity using any subset of the 20,484 cortical dimensions defined by a named Glasser_Parcellation parcel (1–360).
-7. WHEN an ROI mask is applied, THE System SHALL extract only the dimensions corresponding to that ROI before computing the similarity score.
-8. IF a requested ROI name does not match any known Glasser parcel or ICA network, THEN THE System SHALL return a descriptive error listing valid ROI identifiers.
-9. THE System SHALL include the vertex count used in the comparison in every Similarity_Result.
+6. WHEN an ICA_Network mask is applied, THE System SHALL extract only the dimensions corresponding to that network before computing the similarity score.
+7. IF a requested network name does not match any known ICA_Network, THEN THE System SHALL return a descriptive error listing valid network identifiers.
+8. THE System SHALL include the vertex count used in the comparison in every Similarity_Result.
 
 ---
 
@@ -118,20 +116,7 @@ Semantic similarity — as produced by language embedding models — captures wh
 
 ---
 
-### Requirement 5: Optional Glasser Parcel-Level Similarity
-
-**User Story:** As a developer, I want to optionally compute similarity at the finer Glasser 360-parcel level, so that I can investigate specific brain areas beyond the five ICA networks.
-
-#### Acceptance Criteria
-
-1. THE System SHALL support ROI-masked similarity using any subset of the 20,484 cortical dimensions defined by a named Glasser_Parcellation parcel (1–360).
-2. WHEN a Glasser parcel ROI is requested, THE System SHALL compute Pearson correlation between the two Collapsed_Responses restricted to that parcel's vertices.
-3. IF a requested ROI name does not match any known Glasser parcel or ICA network, THEN THE System SHALL return a descriptive error listing valid ROI identifiers.
-4. THE System SHALL include the vertex count of the requested parcel in the Similarity_Result.
-
----
-
-### Requirement 6: Validation Against Known Ground Truths
+### Requirement 5: Validation Against Known Ground Truths
 
 **User Story:** As a developer, I want to verify that the cognitive similarity system produces results consistent with known neuroscientific findings from the TRIBE v2 paper, so that I can trust the system's outputs.
 
@@ -163,7 +148,7 @@ Semantic similarity — as produced by language embedding models — captures wh
 
 ---
 
-### Requirement 7: Serialization and Caching of Collapsed Responses
+### Requirement 6: Serialization and Caching of Collapsed Responses
 
 **User Story:** As a developer, I want to serialize and reload Collapsed_Responses, so that I can avoid re-running TRIBE v2 inference for stimuli I have already processed.
 
@@ -174,11 +159,11 @@ Semantic similarity — as produced by language embedding models — captures wh
 3. FOR ALL valid Collapsed_Responses, serializing then deserializing SHALL produce a tensor equal to the original within float32 precision (round-trip property).
 4. THE System SHALL associate each serialized Collapsed_Response with a content-addressed identifier derived from the Stimulus (e.g., a hash of the input modality data) to enable cache lookup.
 5. IF a Collapsed_Response for a given Stimulus is already cached, THEN THE System SHALL load it from cache rather than re-running TRIBE_v2 inference.
-6. THE Pretty_Printer SHALL format Similarity_Results as human-readable JSON, including all metadata fields defined in Requirement 5.
+6. THE Pretty_Printer SHALL format Similarity_Results as human-readable JSON, including all metadata fields defined in Requirement 4.
 
 ---
 
-### Requirement 8: Ranked Similarity
+### Requirement 7: Ranked Similarity
 
 **User Story:** As a developer, I want to rank a corpus of stimuli by their cognitive similarity to a query stimulus, so that I can see which stimuli are most and least similar to it across each cognitive dimension.
 
@@ -207,7 +192,6 @@ Key resources for implementation and further research. These should be consulted
 
 ### Neuroscience Methodology
 - **Representational Similarity Analysis (RSA)**: Kriegeskorte et al. (2008). *Representational similarity analysis — connecting the branches of systems neuroscience.* Frontiers in Systems Neuroscience. https://pmc.ncbi.nlm.nih.gov/articles/PMC2605405/ — Background context for pairwise activation pattern comparison using Pearson correlation. Note: we use the core Pearson correlation metric from this framework but do not implement full RSA (no RDMs or second-order comparisons).
-- **Glasser 360-Parcel Parcellation**: Glasser et al. (2016). *A multi-modal parcellation of human cerebral cortex.* Nature, 536, 171–178. — The cortical atlas used by TRIBE v2 for parcel-level analysis.
 - **NeuroSynth (for ICA network validation)**: Kent et al. (2026). *NeuroSynth Compose.* https://neurosynth.org — Meta-analysis tool used by the paper to validate ICA network components against known functional maps.
 
 ### Validation Stimuli

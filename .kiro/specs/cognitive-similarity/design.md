@@ -44,7 +44,6 @@ graph TD
         CR --> RC
         RC --> SE[SimilarityEngine]
         ICA[ICANetworkAtlas<br/>5 network masks] --> SE
-        GL[GlasserAtlas<br/>360 parcels] --> SE
         SE --> P[Cognitive_Similarity_Profile<br/>5 network scores + whole-cortex]
         P --> R[RankedSimilarity]
         P --> V[ValidationSuite]
@@ -59,7 +58,7 @@ The system is split across two environments:
 | Environment | Components | Why |
 |---|---|---|
 | Google Colab Pro (A100 GPU) | `remote_inference.ipynb`, `StimulusRunner` | TRIBE v2 requires a GPU. Colab Pro (available via student plan) provides an A100, reducing inference time to ~5 minutes for the full IBC corpus. Colab's job is purely inference — run TRIBE v2, save raw tensors. |
-| Local Mac | `TemporalCollapser`, `ResponseCache`, `SimilarityEngine`, `ICANetworkAtlas`, `GlasserAtlas`, `CognitiveSimilarity`, `ValidationSuite`, `DemoNotebook` | All analysis logic runs locally. Collapsing is done locally so the strategy can be changed without re-running Colab. |
+| Local Mac | `TemporalCollapser`, `ResponseCache`, `SimilarityEngine`, `ICANetworkAtlas`, `CognitiveSimilarity`, `ValidationSuite`, `DemoNotebook` | All analysis logic runs locally. Collapsing is done locally so the strategy can be changed without re-running Colab. |
 
 The boundary between the two is the Google Drive cache directory. Once raw tensors are cached, all similarity computation runs entirely locally with no GPU needed.
 
@@ -72,7 +71,6 @@ The boundary between the two is the Google Drive cache directory. Once raw tenso
 | `TemporalCollapser` | Local | Reduces cortical `[T, 20,484]` → `[20,484]` via peak (≤10s) or GLM+HRF (>10s); result cached locally alongside raw tensors |
 | `ResponseCache` | Both | Colab writes raw tensors; local reads raw tensors and writes/reads collapsed responses |
 | `ICANetworkAtlas` | Local | Loads and exposes the five ICA network vertex masks (~2,048 vertices each) from HuggingFace |
-| `GlasserAtlas` | Local | Loads and exposes the 360-parcel Glasser parcellation vertex masks |
 | `SimilarityEngine` | Local | Computes per-network Pearson correlation, whole-cortex score, ranked lists |
 | `CognitiveSimilarity` | Local | Top-level facade: orchestrates all components, exposes public API |
 | `ValidationSuite` | Local | Runs 9 expected-ordering checks against cached IBC tensors |
@@ -309,20 +307,7 @@ The ICA components are continuous vectors over all 20,484 vertices. Two modes ar
 - **Binary mask mode** (default): top 10% threshold (~2,048 vertices), consistent with Figure 6A visualization in the paper.
 - **Continuous weighting mode**: full component vector used as per-vertex weights — vertices with stronger network association contribute more to the similarity score, preserving all information from the ICA decomposition.
 
-Masks are not mutually exclusive — a vertex can appear in multiple network masks. All 20,484 vertices contribute to whole-cortex and Glasser parcel queries regardless of mask membership.
-
-### `GlasserAtlas`
-
-```python
-class GlasserAtlas:
-    def __init__(self) -> None:
-        """Loads Glasser 360-parcel parcellation."""
-
-    def get_vertex_indices(self, parcel_id: int) -> np.ndarray:
-        """Returns vertex indices for parcel 1–360."""
-
-    def list_parcels(self) -> list[int]: ...
-```
+Masks are not mutually exclusive — a vertex can appear in multiple network masks. All 20,484 vertices contribute to whole-cortex queries regardless of mask membership.
 
 ### `SimilarityEngine`
 
@@ -331,7 +316,6 @@ class SimilarityEngine:
     def __init__(
         self,
         ica_atlas: ICANetworkAtlas,
-        glasser_atlas: GlasserAtlas,
         ica_mode: ICAMode = ICAMode.BINARY_MASK,    # default: top 10% binary mask
     ) -> None: ...
 
@@ -348,13 +332,6 @@ class SimilarityEngine:
         response_b: np.ndarray,
         network: ICANetwork,
         ica_mode: ICAMode | None = None,
-    ) -> float: ...
-
-    def compute_glasser_score(
-        self,
-        response_a: np.ndarray,
-        response_b: np.ndarray,
-        parcel_id: int,
     ) -> float: ...
 ```
 
@@ -409,7 +386,7 @@ class ValidationSuite:
     def run(self) -> ValidationReport: ...
 ```
 
-Runs 9 expected-ordering checks (see Requirement 7). Loads stimuli by looking up their content hashes in `manifest.json`, retrieves their `Collapsed_Response` from `ResponseCache`, then computes and compares similarity scores. Reports pass/fail per check and a summary count.
+Runs 9 expected-ordering checks (see Requirement 5). Loads stimuli by looking up their content hashes in `manifest.json`, retrieves their `Collapsed_Response` from `ResponseCache`, then computes and compares similarity scores. Reports pass/fail per check and a summary count.
 
 ---
 
@@ -659,7 +636,7 @@ A local Jupyter notebook (`demo.ipynb`) is included as an interactive runthrough
 | Stimulus has no modality (no video, audio, or text) | Raise `ValueError` with descriptive message |
 | Peak timepoint unavailable (stimulus too short) | Fall back to last timepoint; log `WARNING` |
 | Zero-variance `Collapsed_Response` in a network | Return score `0.0`; set `NetworkScore.warning` |
-| Unknown ROI name (not a valid Glasser parcel or ICA network) | Raise `ValueError` listing valid identifiers |
+| Unknown ROI name (not a valid ICA network) | Raise `ValueError` listing valid identifiers |
 | Corpus has fewer than 2 stimuli for ranking | Raise `ValueError` |
 | Cache file corrupted or wrong shape | Log `WARNING`, re-run inference, overwrite cache |
 | TRIBE v2 model unavailable (network error) | Propagate `OSError` / `huggingface_hub` exception with context |
@@ -729,27 +706,19 @@ A local Jupyter notebook (`demo.ipynb`) is included as an interactive runthrough
 
 *For any* of the five `ICANetwork` values, when computing a per-network similarity score, the system SHALL use only the vertex indices belonging to that network's mask — no vertices outside the mask shall contribute to the score.
 
-**Validates: Requirements 3.3, 3.5**
+**Validates: Requirements 3.5, 3.6**
 
 ---
 
-### Property 6: Glasser Parcel Masking Isolation
+### Property 6: Invalid ROI Rejection
 
-*For any* valid Glasser parcel ID in `[1, 360]`, when computing a parcel-level similarity score, the system SHALL use only the vertex indices belonging to that parcel — no vertices outside the parcel shall contribute to the score.
+*For any* string or integer that does not correspond to a valid `ICANetwork` enum value, the system SHALL raise a `ValueError` that lists valid identifiers.
 
-**Validates: Requirements 3.4, 6.1, 6.2**
-
----
-
-### Property 7: Invalid ROI Rejection
-
-*For any* string or integer that does not correspond to a valid `ICANetwork` enum value or a valid Glasser parcel ID (1–360), the system SHALL raise a `ValueError` that lists valid identifiers.
-
-**Validates: Requirements 3.6, 6.3**
+**Validates: Requirements 3.7**
 
 ---
 
-### Property 8: Continuous ICA Weight Normalization
+### Property 7: Continuous ICA Weight Normalization
 
 *For any* ICA component vector and *for any* `ICAMode.CONTINUOUS_WEIGHTS` computation, the absolute ICA component values used as weights SHALL sum to `1.0` (within float32 precision) after normalization.
 
@@ -757,15 +726,15 @@ A local Jupyter notebook (`demo.ipynb`) is included as an interactive runthrough
 
 ---
 
-### Property 9: Cognitive Similarity Profile Structure and Score Range
+### Property 8: Cognitive Similarity Profile Structure and Score Range
 
 *For any* two `Collapsed_Response` vectors of shape `(20484,)`, the resulting `CognitiveSimilarityProfile` SHALL contain exactly five `NetworkScore` entries (one per `ICANetwork` enum value), and every score SHALL be in the range `[-1.0, 1.0]`.
 
-**Validates: Requirements 5.1, 5.2**
+**Validates: Requirements 4.1, 4.2**
 
 ---
 
-### Property 10: Whole-Cortex Score Is Vertex-Count-Weighted Average
+### Property 9: Whole-Cortex Score Is Vertex-Count-Weighted Average
 
 *For any* `CognitiveSimilarityProfile`, the `whole_cortex_score` SHALL equal the vertex-count-weighted average of the five per-network scores:
 
@@ -773,71 +742,71 @@ A local Jupyter notebook (`demo.ipynb`) is included as an interactive runthrough
 whole_cortex_score = sum(ns.score * ns.vertex_count for ns in scores) / sum(ns.vertex_count for ns in scores)
 ```
 
-**Validates: Requirements 5.4**
+**Validates: Requirements 4.4**
 
 ---
 
-### Property 11: Similarity Result Structural Completeness
+### Property 10: Similarity Result Structural Completeness
 
 *For any* `SimilarityResult`, all of the following fields SHALL be populated and non-null: `profile` (with 5 network scores each having `vertex_count > 0`), `whole_cortex_score`, `collapsing_strategy_a`, `collapsing_strategy_b`, and `ica_mode`.
 
-**Validates: Requirements 3.9, 4.5**
+**Validates: Requirements 3.8, 4.5**
 
 ---
 
-### Property 12: Batch Result Ordering
+### Property 11: Batch Result Ordering
 
 *For any* query stimulus and list of N stimuli (N ≥ 1), the batch `compare()` call SHALL return exactly N `SimilarityResult` objects in the same order as the input list.
 
-**Validates: Requirements 5.7**
+**Validates: Requirements 4.7**
 
 ---
 
-### Property 13: Collapsed Response Serialization Round-Trip
+### Property 12: Collapsed Response Serialization Round-Trip
 
 *For any* valid `Collapsed_Response` (float32 array of shape `(20484,)`), serializing to a `.npy` file and then deserializing SHALL produce an array that is element-wise identical to the original (`numpy.array_equal` returns `True`).
 
-**Validates: Requirements 8.1, 8.2, 8.3**
+**Validates: Requirements 6.1, 6.2, 6.3**
 
 ---
 
-### Property 14: Content Hash Determinism and Uniqueness
+### Property 13: Content Hash Determinism and Uniqueness
 
 *For any* `Stimulus`, `content_hash(stimulus)` SHALL return the same value on every call (determinism). *For any* two `Stimulus` objects with different modality file contents, their content hashes SHALL differ (collision resistance for distinct inputs).
 
-**Validates: Requirements 8.4**
+**Validates: Requirements 6.4**
 
 ---
 
-### Property 15: Cache Hit Avoids Re-Inference
+### Property 14: Cache Hit Avoids Re-Inference
 
 *For any* `Stimulus` that has already been processed (its `Collapsed_Response` is in the cache), a subsequent call to `get_collapsed_response()` SHALL NOT invoke `model.predict()` again.
 
-**Validates: Requirements 8.5**
+**Validates: Requirements 6.5**
 
 ---
 
-### Property 16: JSON Output Contains All Required Fields
+### Property 15: JSON Output Contains All Required Fields
 
 *For any* `SimilarityResult`, the JSON-formatted output SHALL contain all metadata fields specified in Requirement 4: per-network scores, whole-cortex score, temporal collapsing methods, vertex counts per network, and ICA mode used.
 
-**Validates: Requirements 7.6**
+**Validates: Requirements 6.6**
 
 ---
 
-### Property 17: Ranked List Is Sorted in Descending Order
+### Property 16: Ranked List Is Sorted in Descending Order
 
 *For any* query stimulus and corpus of N ≥ 2 stimuli, each ranked list (per-network and whole-cortex) SHALL be sorted in descending order of `Cognitive_Similarity_Score` (most similar first).
 
-**Validates: Requirements 9.1**
+**Validates: Requirements 7.1**
 
 ---
 
-### Property 18: Tie Handling — Equal Scores Share Rank
+### Property 17: Tie Handling — Equal Scores Share Rank
 
 *For any* ranked list where two or more entries have equal `Cognitive_Similarity_Score` values, those entries SHALL be assigned the same `rank` value.
 
-**Validates: Requirements 9.5**
+**Validates: Requirements 7.5**
 
 ---
 
@@ -861,26 +830,25 @@ def test_property_N_...(...)
 
 ### Property Test Implementations
 
-Each of the 18 correctness properties above maps to a single Hypothesis property test:
+Each of the 17 correctness properties above maps to a single Hypothesis property test:
 
 - **P1** — `@given(st.lists(stimulus_strategy(), min_size=1))` — mock TRIBE v2, count `predict()` calls
 - **P2** — `@given(st.just(Stimulus()))` — verify `ValueError` raised
 - **P3** — `@given(cortical_response_strategy(), st.floats(0.1, 60.0))` — verify strategy selection and output shape
 - **P4** — `@given(cortical_response_strategy(min_T=6))` — verify peak index correctness
 - **P5** — `@given(st.sampled_from(ICANetwork), collapsed_response_pair_strategy())` — verify vertex isolation
-- **P6** — `@given(st.integers(1, 360), collapsed_response_pair_strategy())` — verify parcel isolation
-- **P7** — `@given(invalid_roi_strategy())` — verify `ValueError` with valid identifiers listed
-- **P8** — `@given(ica_component_strategy(), st.just(ICAMode.CONTINUOUS_WEIGHTS))` — verify weights sum to 1.0
-- **P9** — `@given(collapsed_response_pair_strategy())` — verify 5 scores, all in [-1, 1]
-- **P10** — `@given(collapsed_response_pair_strategy())` — verify weighted average formula
-- **P11** — `@given(collapsed_response_pair_strategy())` — verify all fields populated
-- **P12** — `@given(collapsed_response_strategy(), st.lists(collapsed_response_strategy(), min_size=1))` — verify N results in order
-- **P13** — `@given(collapsed_response_strategy())` — verify numpy round-trip equality
-- **P14** — `@given(stimulus_strategy())` — verify hash determinism; `@given(two_distinct_stimuli_strategy())` — verify hash uniqueness
-- **P15** — `@given(stimulus_strategy())` — mock TRIBE v2, verify `predict()` not called on second access
-- **P16** — `@given(similarity_result_strategy())` — verify JSON contains all required keys
-- **P17** — `@given(collapsed_response_strategy(), st.lists(collapsed_response_strategy(), min_size=2))` — verify descending sort
-- **P18** — `@given(scores_with_ties_strategy())` — verify tied entries share rank
+- **P6** — `@given(invalid_roi_strategy())` — verify `ValueError` with valid identifiers listed
+- **P7** — `@given(ica_component_strategy(), st.just(ICAMode.CONTINUOUS_WEIGHTS))` — verify weights sum to 1.0
+- **P8** — `@given(collapsed_response_pair_strategy())` — verify 5 scores, all in [-1, 1]
+- **P9** — `@given(collapsed_response_pair_strategy())` — verify weighted average formula
+- **P10** — `@given(collapsed_response_pair_strategy())` — verify all fields populated
+- **P11** — `@given(collapsed_response_strategy(), st.lists(collapsed_response_strategy(), min_size=1))` — verify N results in order
+- **P12** — `@given(collapsed_response_strategy())` — verify numpy round-trip equality
+- **P13** — `@given(stimulus_strategy())` — verify hash determinism; `@given(two_distinct_stimuli_strategy())` — verify hash uniqueness
+- **P14** — `@given(stimulus_strategy())` — mock TRIBE v2, verify `predict()` not called on second access
+- **P15** — `@given(similarity_result_strategy())` — verify JSON contains all required keys
+- **P16** — `@given(collapsed_response_strategy(), st.lists(collapsed_response_strategy(), min_size=2))` — verify descending sort
+- **P17** — `@given(scores_with_ties_strategy())` — verify tied entries share rank
 
 ### Unit Tests
 
@@ -890,7 +858,6 @@ Focus on specific examples and edge cases not covered by property tests:
 - `SimilarityEngine`: zero-variance vector → score 0.0 with warning in `NetworkScore`
 - `CognitiveSimilarity.rank()`: corpus with fewer than 2 stimuli → `ValueError`
 - `ICANetworkAtlas`: verify each network has ~2,048 vertices (top 10% of 20,484)
-- `GlasserAtlas`: verify parcel IDs 1–360 all resolve to non-empty vertex sets
 - `CollapsingStrategy.AUTO` is the default parameter value
 - Single-network query returns a single `Cognitive_Similarity_Score`
 - Binary mask mode and continuous weighting mode produce different scores for the same stimulus pair
@@ -903,4 +870,4 @@ Focus on specific examples and edge cases not covered by property tests:
 
 ### Validation Suite
 
-The `ValidationSuite` runs 9 integration checks against IBC stimuli (see Requirement 7). These are not property tests — each check is a single execution verifying a specific neuroscientific ordering. The suite reports pass/fail per check and a summary count. These checks serve as the system's acceptance test against known ground truths from the TRIBE v2 paper.
+The `ValidationSuite` runs 9 integration checks against IBC stimuli (see Requirement 5). These are not property tests — each check is a single execution verifying a specific neuroscientific ordering. The suite reports pass/fail per check and a summary count. These checks serve as the system's acceptance test against known ground truths from the TRIBE v2 paper.
