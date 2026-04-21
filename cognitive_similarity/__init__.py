@@ -4,7 +4,6 @@ from cognitive_similarity.facade import CognitiveSimilarity
 from cognitive_similarity.models import (
     ICANetwork,
     ICAMode,
-    CollapsingStrategy,
     BrainResponse,
     Stimulus,
     NetworkScore,
@@ -21,7 +20,6 @@ __all__ = [
     "CognitiveSimilarity",
     "ICANetwork",
     "ICAMode",
-    "CollapsingStrategy",
     "BrainResponse",
     "Stimulus",
     "NetworkScore",

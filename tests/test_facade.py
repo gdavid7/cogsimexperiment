@@ -22,7 +22,6 @@ from cognitive_similarity.collapsing import TemporalCollapser
 from cognitive_similarity.facade import CognitiveSimilarity, _rank_entries
 from cognitive_similarity.ica_atlas import ICANetworkAtlas, N_VERTICES
 from cognitive_similarity.models import (
-    CollapsingStrategy,
     ICAMode,
     ICANetwork,
     RankedEntry,
@@ -270,8 +269,7 @@ def test_property_10_similarity_result_structural_completeness(
     Validates: Requirements 3.8, 4.5
 
     compare() returns a SimilarityResult with a CognitiveSimilarityProfile containing
-    all 5 networks, plus stimulus_a_id, stimulus_b_id, collapsing_strategy_a,
-    collapsing_strategy_b.
+    all 5 networks, plus stimulus_a_id and stimulus_b_id.
     """
     with tempfile.TemporaryDirectory() as tmp_dir:
         cache = ResponseCache(tmp_dir)
@@ -290,8 +288,6 @@ def test_property_10_similarity_result_structural_completeness(
         # Required fields populated
         assert result.stimulus_a_id is not None and result.stimulus_a_id != ""
         assert result.stimulus_b_id is not None and result.stimulus_b_id != ""
-        assert result.collapsing_strategy_a is not None
-        assert result.collapsing_strategy_b is not None
 
         # Profile must have all 5 networks
         profile = result.profile
@@ -488,7 +484,7 @@ def test_property_15_json_output_completeness(
     Validates: Requirements 6.6
 
     SimilarityResult can be serialized to JSON and contains all required fields:
-    profile, stimulus_a_id, stimulus_b_id, collapsing_strategy_a, collapsing_strategy_b.
+    profile, stimulus_a_id, stimulus_b_id.
     """
     with tempfile.TemporaryDirectory() as tmp_dir:
         cache = ResponseCache(tmp_dir)
@@ -507,12 +503,12 @@ def test_property_15_json_output_completeness(
             """Recursively convert enums and numpy types for JSON serialization."""
             if isinstance(obj, dict):
                 return {
-                    (k.value if isinstance(k, (ICANetwork, ICAMode, CollapsingStrategy)) else k): convert_for_json(v)
+                    (k.value if isinstance(k, (ICANetwork, ICAMode)) else k): convert_for_json(v)
                     for k, v in obj.items()
                 }
             if isinstance(obj, list):
                 return [convert_for_json(v) for v in obj]
-            if isinstance(obj, (ICANetwork, ICAMode, CollapsingStrategy)):
+            if isinstance(obj, (ICANetwork, ICAMode)):
                 return obj.value
             if isinstance(obj, np.floating):
                 return float(obj)
@@ -528,8 +524,6 @@ def test_property_15_json_output_completeness(
             "profile",
             "stimulus_a_id",
             "stimulus_b_id",
-            "collapsing_strategy_a",
-            "collapsing_strategy_b",
         }
         for field in required_fields:
             assert field in parsed, f"Missing required field '{field}' in JSON output"
@@ -580,8 +574,6 @@ def test_integration_compare_with_prepopulated_cache(
     assert isinstance(result, SimilarityResult)
     assert result.stimulus_a_id == "stim_a"
     assert result.stimulus_b_id == "stim_b"
-    assert result.collapsing_strategy_a is not None
-    assert result.collapsing_strategy_b is not None
     assert len(result.profile.network_scores) == 5
     assert set(result.profile.network_scores.keys()) == set(ICANetwork)
     assert isinstance(result.profile.whole_cortex_score, float)

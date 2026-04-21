@@ -46,7 +46,7 @@ cognitive_similarity/       # Main package
 ├── facade.py              # CognitiveSimilarity — top-level API
 ├── similarity_engine.py   # Pearson correlation across networks
 ├── ica_atlas.py           # ICANetworkAtlas — network masks / components
-├── collapsing.py          # TemporalCollapser (AUTO / PEAK / GLM_HRF)
+├── collapsing.py          # TemporalCollapser (auto-selects method from duration)
 ├── cache.py               # ResponseCache — disk-based
 ├── stimulus_runner.py     # TRIBE v2 inference (Colab-only, GPU)
 └── validation.py          # ValidationSuite

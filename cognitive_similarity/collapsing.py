@@ -5,48 +5,40 @@ import logging
 import numpy as np
 import pandas as pd
 
-from cognitive_similarity.models import CollapsingStrategy, Stimulus
+from cognitive_similarity.models import Stimulus
 
 log = logging.getLogger(__name__)
 
 _VERTICES = 20484
 _PEAK_OFFSET_S = 5.0
+_LONG_STIMULUS_THRESHOLD_S = 10.0
 
 
 class TemporalCollapser:
-    """Reduces a cortical response timeseries to a single spatial vector."""
+    """Reduces a cortical response timeseries to a single spatial vector.
+
+    Method is selected automatically from stimulus duration (Req 2.1, 2.2):
+    peak extraction at t+5s for stimuli ≤10s, GLM+HRF fitting for longer ones.
+    Not caller-configurable.
+    """
 
     def collapse(
         self,
         cortical_response: np.ndarray,  # shape (T, 20484)
         stimulus: Stimulus,
-        strategy: CollapsingStrategy = CollapsingStrategy.AUTO,
         tr_s: float = 1.0,
-    ) -> tuple[np.ndarray, CollapsingStrategy]:
-        """
-        Returns (collapsed_response [20484], strategy_used).
+    ) -> np.ndarray:
+        """Return the collapsed cortical response of shape (20484,).
 
-        Duration is taken from stimulus.duration_s; if None, inferred as T * tr_s.
-        AUTO: peak if duration <= 10s, GLM+HRF if duration > 10s.
+        Duration comes from ``stimulus.duration_s``; if None, inferred as ``T * tr_s``.
         """
         T = cortical_response.shape[0]
         duration_s = stimulus.duration_s if stimulus.duration_s is not None else T * tr_s
 
-        if strategy is CollapsingStrategy.AUTO:
-            strategy = CollapsingStrategy.PEAK if duration_s <= 10.0 else CollapsingStrategy.GLM_HRF
-
-        # GLM+HRF requires at least 2 timepoints to compute TR via np.diff;
-        # fall back to PEAK when T == 1.
-        if strategy is CollapsingStrategy.GLM_HRF and T < 2:
-            log.warning("GLM+HRF requires T >= 2; falling back to PEAK (T=%d)", T)
-            strategy = CollapsingStrategy.PEAK
-
-        if strategy is CollapsingStrategy.PEAK:
-            collapsed = self._peak(cortical_response, tr_s)
-        else:
-            collapsed = self._glm_hrf(cortical_response, duration_s, tr_s)
-
-        return collapsed, strategy
+        # GLM+HRF needs ≥2 timepoints to build a design matrix; otherwise PEAK.
+        if duration_s > _LONG_STIMULUS_THRESHOLD_S and T >= 2:
+            return self._glm_hrf(cortical_response, duration_s, tr_s)
+        return self._peak(cortical_response, tr_s)
 
     # ------------------------------------------------------------------
     # Private helpers

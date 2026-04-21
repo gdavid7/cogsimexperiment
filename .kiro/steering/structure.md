@@ -51,10 +51,10 @@ tests/                        # Test suite
   - Provides vertex masks and component vectors for 5 networks
   - Top 10% percentile for binary masks
 
-- **collapsing.py**: Temporal dimension reduction
-  - AUTO strategy: selects PEAK or GLM_HRF based on duration
-  - PEAK: argmax over time dimension
-  - GLM_HRF: GLM-based hemodynamic response fitting
+- **collapsing.py**: Temporal dimension reduction (shape `(T, 20484)` → `(20484,)`)
+  - Method selected automatically from stimulus duration — not caller-configurable
+  - Peak extraction at t+5s for duration ≤ 10s
+  - GLM+HRF fitting (nilearn design matrix + lstsq) for duration > 10s
 
 ### Data & Caching Layer
 - **cache.py**: Disk-based response storage
@@ -64,7 +64,7 @@ tests/                        # Test suite
 
 - **models.py**: Type-safe data structures
   - All dataclasses with type hints
-  - Enums for ICANetwork, ICAMode, CollapsingStrategy
+  - Enums for ICANetwork, ICAMode
   - Validation methods where needed
 
 ### Inference Layer (Colab-only)

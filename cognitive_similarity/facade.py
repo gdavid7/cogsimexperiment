@@ -12,7 +12,6 @@ from cognitive_similarity.cache import ResponseCache
 from cognitive_similarity.collapsing import TemporalCollapser
 from cognitive_similarity.ica_atlas import ICANetworkAtlas
 from cognitive_similarity.models import (
-    CollapsingStrategy,
     ICAMode,
     ICANetwork,
     RankedEntry,
@@ -90,7 +89,7 @@ class CognitiveSimilarity:
         if raw is not None:
             raw_cortical, _ = raw
             log.debug("Cache hit (raw) for stimulus %s — collapsing", stimulus.stimulus_id)
-            collapsed, _ = self._collapser.collapse(raw_cortical, stimulus)
+            collapsed = self._collapser.collapse(raw_cortical, stimulus)
             self._cache.put_collapsed(stimulus, collapsed)
             return collapsed
 
@@ -105,17 +104,20 @@ class CognitiveSimilarity:
         self,
         stimulus_a: Stimulus,
         stimulus_b: Stimulus,
-        networks: Optional[list[ICANetwork]] = None,
         ica_mode: ICAMode = ICAMode.BINARY_MASK,
     ) -> SimilarityResult:
         """Compare two stimuli and return a SimilarityResult.
+
+        The returned profile always contains scores for all 5 ICA networks,
+        plus a whole-cortex score computed as the vertex-count-weighted
+        average of those 5 networks (Req 4.1, 4.4). This is not configurable.
+        For a single-network query use ``rank(..., network=...)`` or the
+        lower-level ``SimilarityEngine.compute_network_score()``.
 
         Parameters
         ----------
         stimulus_a, stimulus_b:
             Stimuli to compare. Their collapsed responses must be in cache.
-        networks:
-            Networks to include in the profile. None = all 5.
         ica_mode:
             ICA mode to use for similarity computation.
         """
@@ -125,20 +127,12 @@ class CognitiveSimilarity:
         collapsed_a = self.get_collapsed_response(stimulus_a)
         collapsed_b = self.get_collapsed_response(stimulus_b)
 
-        # Determine collapsing strategies used (from cache metadata if available)
-        # We report the strategy that was used when collapsing; since we may have
-        # loaded a pre-collapsed response we infer AUTO as the stored strategy.
-        strategy_a = self._get_strategy(stimulus_a)
-        strategy_b = self._get_strategy(stimulus_b)
-
         profile = self._engine.compute_profile(collapsed_a, collapsed_b, ica_mode=ica_mode)
 
         return SimilarityResult(
             profile=profile,
             stimulus_a_id=id_a,
             stimulus_b_id=id_b,
-            collapsing_strategy_a=strategy_a,
-            collapsing_strategy_b=strategy_b,
         )
 
     def rank(
@@ -170,7 +164,6 @@ class CognitiveSimilarity:
 
         query_id = _ensure_stimulus_id(query)
 
-        # Compute similarity for each corpus stimulus
         results = [self.compare(query, s) for s in corpus]
 
         # Build per-network ranked lists
@@ -200,15 +193,3 @@ class CognitiveSimilarity:
             rankings_whole_cortex=rankings_whole_cortex,
         )
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _get_strategy(self, stimulus: Stimulus) -> CollapsingStrategy:
-        """Return the collapsing strategy for a stimulus.
-
-        Since we can't recover the strategy from a pre-collapsed .npy file,
-        we return AUTO as the canonical default. When we collapse on-the-fly
-        (raw → collapsed), the actual strategy is determined by TemporalCollapser.
-        """
-        return CollapsingStrategy.AUTO

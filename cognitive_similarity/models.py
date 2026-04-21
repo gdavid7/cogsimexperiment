@@ -20,12 +20,6 @@ class ICAMode(Enum):
     CONTINUOUS_WEIGHTS = "continuous"  # full component vector as per-vertex weights
 
 
-class CollapsingStrategy(Enum):
-    AUTO = "auto"
-    PEAK = "peak"
-    GLM_HRF = "glm_hrf"
-
-
 @dataclass
 class BrainResponse:
     """Raw output from StimulusRunner — both model runs preserved for future use."""
@@ -72,8 +66,6 @@ class SimilarityResult:
     profile: CognitiveSimilarityProfile
     stimulus_a_id: str
     stimulus_b_id: str
-    collapsing_strategy_a: CollapsingStrategy
-    collapsing_strategy_b: CollapsingStrategy
     metadata: dict = field(default_factory=dict)
 
 

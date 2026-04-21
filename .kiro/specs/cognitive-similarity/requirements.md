@@ -45,7 +45,7 @@ Semantic similarity — as produced by language embedding models — captures wh
 - **Peak_Response**: The Collapsed_Response obtained by selecting the timepoint at t+5s after stimulus onset — the hemodynamic peak established by the paper (section 5.9) — used for brief stimuli.
 - **GLM_HRF**: A General Linear Model with hemodynamic response function convolution used to estimate the sustained response for longer stimuli, producing a beta-weight vector as the Collapsed_Response. Implemented using `nilearn.glm.first_level.make_first_level_design_matrix` to build the HRF-convolved design matrix, then solved via `numpy.linalg.lstsq` applied directly to the `(T, 20,484)` cortical surface array.
 - **Similarity_Request**: A structured input specifying two stimuli and an optional comparison scope (defaults to full per-ICA-network profile).
-- **Similarity_Result**: A structured output containing the Cognitive_Similarity_Profile (per-ICA-network scores), the Whole_Cortex_Score, and metadata (temporal collapsing method used for each stimulus, vertex counts per network).
+- **Similarity_Result**: A structured output containing the Cognitive_Similarity_Profile (per-ICA-network scores), the Whole_Cortex_Score, and metadata (vertex counts per network). The temporal collapsing method is selected automatically from stimulus duration and is not exposed (see Requirement 2.5).
 
 ---
 
@@ -76,7 +76,7 @@ Semantic similarity — as produced by language embedding models — captures wh
 2. WHEN a Stimulus is classified as long (duration > 10 seconds), THE Temporal_Collapsing SHALL fit a GLM_HRF to the Cortical_Response timeseries and return the resulting beta-weight vector as the Collapsed_Response.
 3. THE Temporal_Collapsing SHALL produce a Collapsed_Response of shape `[20,484]` regardless of the input Cortical_Response duration T.
 4. IF the Cortical_Response timeseries does not contain a timepoint at t+5s (e.g., stimulus is too short), THEN THE Temporal_Collapsing SHALL fall back to the final available timepoint and log a warning.
-5. THE System SHALL expose the temporal collapsing strategy as a configurable parameter, defaulting to automatic selection based on stimulus duration.
+5. THE System SHALL select the temporal collapsing method automatically from stimulus duration (per 2.1 and 2.2). This selection SHALL NOT be caller-configurable and SHALL NOT be exposed in the public API — callers do not need to know which method is used.
 
 ---
 
@@ -109,7 +109,7 @@ Semantic similarity — as produced by language embedding models — captures wh
 2. FOR EACH ICA_Network, THE System SHALL compute the Pearson correlation between the two Collapsed_Responses restricted to the vertices belonging to that network, producing a score in `[-1, 1]`.
 3. THE System SHALL use Pearson correlation (not cosine similarity) as the similarity metric, as it is mean-centered and robust to differences in overall activation magnitude between stimuli. This mirrors the spatial Pearson correlation used by the TRIBE v2 paper for map comparison (sections 2.5, 2.6, 5.10).
 4. THE System SHALL compute a Whole_Cortex_Score as the vertex-count-weighted average of the five ICA_Network scores and include it in the Similarity_Result as a secondary summary.
-5. THE System SHALL include in the Similarity_Result: the per-network profile, the whole-cortex summary score, the temporal collapsing method used for each stimulus, and the vertex count per ICA_Network used in each comparison.
+5. THE System SHALL include in the Similarity_Result: the per-network profile, the whole-cortex summary score, and the vertex count per ICA_Network used in each comparison. The temporal collapsing method is an internal implementation detail (see 2.5) and SHALL NOT appear in the Similarity_Result.
 6. IF either Collapsed_Response restricted to a given ICA_Network has zero variance, THE System SHALL return a score of 0.0 for that network and include a warning in the Similarity_Result.
 7. THE System SHALL support batch Similarity_Requests comparing one stimulus against a list of N stimuli, returning N Similarity_Results in the same order as the input list.
 8. THE System SHALL also support targeted single-network queries where only one ICA_Network score is requested, returning a single Cognitive_Similarity_Score for that network.

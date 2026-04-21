@@ -15,6 +15,7 @@ from cognitive_similarity.models import (
     ValidationCheck,
     ValidationReport,
 )
+from cognitive_similarity.similarity_engine import SimilarityEngine
 
 log = logging.getLogger(__name__)
 
@@ -30,11 +31,11 @@ class ValidationSuite:
 
     def __init__(
         self,
-        system,  # CognitiveSimilarity — avoid circular import
+        engine: SimilarityEngine,
         cache: ResponseCache,
         manifest_path: str,
     ) -> None:
-        self._system = system
+        self._engine = engine
         self._cache = cache
         self._manifest_path = Path(manifest_path)
 
@@ -160,7 +161,7 @@ class ValidationSuite:
         network: ICANetwork,
     ) -> float:
         """Compute network similarity score between two collapsed responses."""
-        return self._system._engine.compute_network_score(response_a, response_b, network)
+        return self._engine.compute_network_score(response_a, response_b, network)
 
     def _check(
         self,

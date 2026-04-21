@@ -94,9 +94,10 @@ class CognitiveSimilarity:
         self,
         stimulus_a: Stimulus,
         stimulus_b: Stimulus,
-        networks: list[ICANetwork] | None = None,  # None = all 5
         ica_mode: ICAMode = ICAMode.BINARY_MASK,
     ) -> SimilarityResult: ...
+    # Always returns all 5 ICA network scores plus a vertex-count-weighted
+    # whole-cortex average of those 5 (Req 4.1, 4.4). Not configurable.
 
     def rank(
         self,
@@ -250,13 +251,14 @@ class TemporalCollapser:
         self,
         cortical_response: np.ndarray,  # shape (T, 20484)
         stimulus: Stimulus,             # duration_s read from here; inferred from T if None
-        strategy: CollapsingStrategy = CollapsingStrategy.AUTO,
-        tr_s: float = 1.0,  # TRIBE v2 TR
-    ) -> tuple[np.ndarray, CollapsingStrategy]:
+        tr_s: float = 1.0,              # TRIBE v2 TR
+    ) -> np.ndarray:
         """
-        Returns (collapsed_response [20484], strategy_used).
+        Returns the collapsed cortical response of shape (20484,).
+
+        Method is selected internally from duration (Req 2.5, not caller-configurable):
+        peak extraction for duration ≤ 10s, GLM+HRF fitting for duration > 10s.
         Duration is taken from stimulus.duration_s; if None, inferred as T * tr_s.
-        AUTO: peak if duration <= 10s, GLM+HRF if duration > 10s.
         """
 ```
 
@@ -378,7 +380,7 @@ Serialization uses `numpy.save()` / `numpy.load()` with `.npy` format, which pre
 class ValidationSuite:
     def __init__(
         self,
-        system: CognitiveSimilarity,
+        engine: SimilarityEngine,  # per-network Pearson computation
         cache: ResponseCache,      # provides collapsed responses for IBC stimuli
         manifest_path: str,        # path to manifest.json (contains GitHub URLs + hashes)
     ) -> None: ...
@@ -410,12 +412,6 @@ class ICANetwork(Enum):
 class ICAMode(Enum):
     BINARY_MASK = "binary_mask"        # top 10% vertices, equal weight (default)
     CONTINUOUS_WEIGHTS = "continuous"  # full component vector as per-vertex weights
-
-
-class CollapsingStrategy(Enum):
-    AUTO = "auto"
-    PEAK = "peak"
-    GLM_HRF = "glm_hrf"
 
 
 @dataclass
@@ -459,9 +455,9 @@ class SimilarityResult:
     profile: CognitiveSimilarityProfile
     stimulus_a_id: str
     stimulus_b_id: str
-    collapsing_strategy_a: CollapsingStrategy
-    collapsing_strategy_b: CollapsingStrategy
     metadata: dict = field(default_factory=dict)
+    # Temporal collapsing method is an internal detail (Req 2.5) and is
+    # intentionally NOT a field here.
 
 @dataclass
 class RankedEntry:
@@ -683,12 +679,9 @@ A local Jupyter notebook (`demo.ipynb`) is included as an interactive runthrough
 
 ---
 
-### Property 3: Temporal Collapsing Strategy Selection and Output Shape
+### Property 3: Temporal Collapsing Output Shape
 
-*For any* `Cortical_Response` tensor of shape `(T, 20484)` with any `T ≥ 1`, the `TemporalCollapser` SHALL:
-- Select `CollapsingStrategy.PEAK` when `stimulus.duration_s ≤ 10.0` (or when duration inferred as `T * tr_s ≤ 10.0`)
-- Select `CollapsingStrategy.GLM_HRF` when `stimulus.duration_s > 10.0` (or inferred duration `> 10.0`)
-- Always produce a `Collapsed_Response` of shape `(20484,)` regardless of `T` or duration
+*For any* `Cortical_Response` tensor of shape `(T, 20484)` with any `T ≥ 1`, the `TemporalCollapser` SHALL produce a `Collapsed_Response` of shape `(20484,)` regardless of `T` or duration. The method is selected internally (peak extraction for duration ≤ 10s, GLM+HRF for duration > 10s) and is not exposed to callers (Req 2.5).
 
 **Validates: Requirements 2.1, 2.2, 2.3**
 
@@ -748,7 +741,7 @@ whole_cortex_score = sum(ns.score * ns.vertex_count for ns in scores) / sum(ns.v
 
 ### Property 10: Similarity Result Structural Completeness
 
-*For any* `SimilarityResult`, all of the following fields SHALL be populated and non-null: `profile` (with 5 network scores each having `vertex_count > 0`), `whole_cortex_score`, `collapsing_strategy_a`, `collapsing_strategy_b`, and `ica_mode`.
+*For any* `SimilarityResult`, all of the following fields SHALL be populated and non-null: `profile` (with 5 network scores each having `vertex_count > 0`), `whole_cortex_score`, and `ica_mode`.
 
 **Validates: Requirements 3.8, 4.5**
 
@@ -855,10 +848,10 @@ Each of the 17 correctness properties above maps to a single Hypothesis property
 Focus on specific examples and edge cases not covered by property tests:
 
 - `TemporalCollapser`: peak fallback when T < peak_idx (logs warning, uses last timepoint)
+- `TemporalCollapser`: short stimulus (duration ≤ 10s) produces output equal to `cortical_response[round(5/tr_s)]`; long stimulus output differs from any single timepoint (implicit GLM+HRF)
 - `SimilarityEngine`: zero-variance vector → score 0.0 with warning in `NetworkScore`
 - `CognitiveSimilarity.rank()`: corpus with fewer than 2 stimuli → `ValueError`
 - `ICANetworkAtlas`: verify each network has ~2,048 vertices (top 10% of 20,484)
-- `CollapsingStrategy.AUTO` is the default parameter value
 - Single-network query returns a single `Cognitive_Similarity_Score`
 - Binary mask mode and continuous weighting mode produce different scores for the same stimulus pair
 
