@@ -22,9 +22,15 @@ class ICAMode(Enum):
 
 @dataclass
 class BrainResponse:
-    """Raw output from StimulusRunner — both model runs preserved for future use."""
-    cortical: np.ndarray        # shape (n_timesteps, 20484) float32 — from cortical model
-    subcortical: np.ndarray     # shape (n_timesteps, 8802) float32  — from subcortical model
+    """Raw output from StimulusRunner.
+
+    Only the cortical response is produced: the public `facebook/tribev2`
+    checkpoint ships a single `best.ckpt` hard-wired to TribeSurfaceProjector
+    on fsaverage5 (20,484 outputs). Meta's training launcher references a
+    MaskProjector(mask="subcortical") configuration, but that checkpoint is
+    not released.
+    """
+    cortical: np.ndarray        # shape (n_timesteps, 20484) float32
     segments: list              # TRIBE v2 segment objects aligned with cortical
 
 

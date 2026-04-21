@@ -13,7 +13,6 @@ log = logging.getLogger(__name__)
 
 # Expected shapes for validation on load
 _CORTICAL_VERTICES = 20484
-_SUBCORTICAL_VOXELS = 8802
 
 
 class ResponseCache:
@@ -25,7 +24,6 @@ class ResponseCache:
         └── tensors/
             └── <sha256_hash>/
                 ├── raw_cortical.npy      # (T, 20484) float32
-                ├── raw_subcortical.npy   # (T, 8802)  float32
                 └── collapsed.npy         # (20484,)   float32
     """
 
@@ -50,37 +48,27 @@ class ResponseCache:
         path.parent.mkdir(parents=True, exist_ok=True)
         np.save(path, collapsed.astype(np.float32))
 
-    def get_raw(self, stimulus: Stimulus) -> Optional[tuple[np.ndarray, np.ndarray]]:
-        """Returns (raw_cortical, raw_subcortical) or None."""
+    def get_raw(self, stimulus: Stimulus) -> Optional[np.ndarray]:
+        """Returns raw_cortical or None."""
         h = self._content_hash(stimulus)
         cortical_path = self._tensors_dir / h / "raw_cortical.npy"
-        subcortical_path = self._tensors_dir / h / "raw_subcortical.npy"
 
-        if not cortical_path.exists() or not subcortical_path.exists():
+        if not cortical_path.exists():
             return None
 
-        cortical = self._load_npy(cortical_path, expected_ndim=2, expected_last_dim=_CORTICAL_VERTICES, label="raw_cortical")
-        if cortical is None:
-            return None
+        return self._load_npy(
+            cortical_path,
+            expected_ndim=2,
+            expected_last_dim=_CORTICAL_VERTICES,
+            label="raw_cortical",
+        )
 
-        subcortical = self._load_npy(subcortical_path, expected_ndim=2, expected_last_dim=_SUBCORTICAL_VOXELS, label="raw_subcortical")
-        if subcortical is None:
-            return None
-
-        return cortical, subcortical
-
-    def put_raw(
-        self,
-        stimulus: Stimulus,
-        raw_cortical: np.ndarray,
-        raw_subcortical: np.ndarray,
-    ) -> None:
-        """Saves raw tensors to <cache_dir>/tensors/<content_hash>/raw_*.npy"""
+    def put_raw(self, stimulus: Stimulus, raw_cortical: np.ndarray) -> None:
+        """Saves raw_cortical to <cache_dir>/tensors/<content_hash>/raw_cortical.npy"""
         h = self._content_hash(stimulus)
         tensor_dir = self._tensors_dir / h
         tensor_dir.mkdir(parents=True, exist_ok=True)
         np.save(tensor_dir / "raw_cortical.npy", raw_cortical.astype(np.float32))
-        np.save(tensor_dir / "raw_subcortical.npy", raw_subcortical.astype(np.float32))
 
     # ------------------------------------------------------------------
     # Internal helpers

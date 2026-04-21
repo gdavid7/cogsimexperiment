@@ -85,9 +85,8 @@ class CognitiveSimilarity:
             return collapsed
 
         # Step 2: raw cortical cached?
-        raw = self._cache.get_raw(stimulus)
-        if raw is not None:
-            raw_cortical, _ = raw
+        raw_cortical = self._cache.get_raw(stimulus)
+        if raw_cortical is not None:
             log.debug("Cache hit (raw) for stimulus %s — collapsing", stimulus.stimulus_id)
             collapsed = self._collapser.collapse(raw_cortical, stimulus)
             self._cache.put_collapsed(stimulus, collapsed)

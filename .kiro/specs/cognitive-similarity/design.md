@@ -15,7 +15,7 @@ The system is designed to be used as a Python library. The primary entry point i
 
 ### Key Design Decisions
 
-- **Cortical-only for similarity, both tensors cached**: TRIBE v2 has two separate model configurations: the default cortical model (`TribeModel.from_pretrained("facebook/tribev2")`) produces `(n_timesteps, 20,484)`, and a subcortical model (configured with `MaskProjector(mask="subcortical")`) produces `(n_timesteps, 8,802)`. These are separate `predict()` calls. Both tensors are stored in cache for future investigation — only the cortical tensor is used for similarity computation.
+- **Cortical-only, single model**: `TribeModel.from_pretrained("facebook/tribev2")` returns a model hard-wired to TribeSurfaceProjector on fsaverage5, producing `(n_timesteps, 20,484)`. The paper and the library's training grid (`tribev2/grids/run_subcortical.py`) describe a subcortical variant that would produce `(n_timesteps, 8,802)` via `MaskProjector(mask="subcortical")`, but Meta has not released those weights — the HF repo ships only `best.ckpt` + `config.yaml`. This system therefore runs one predict() call per stimulus and caches only the cortical tensor.
 - **Stimulus isolation via separate predict() calls**: Each stimulus is run through TRIBE v2 via its own independent `get_events_dataframe()` + `predict()` call. The TRIBE v2 API already enforces single-stimulus input (`get_events_dataframe()` accepts exactly one path). No manual silence padding is needed — `predict()` automatically discards empty segments (`remove_empty_segments=True` by default), so blank padding would be filtered out anyway. Isolation is achieved simply by never combining stimuli into a single call.
 - **Pairwise Pearson correlation**: Each stimulus is run through TRIBE v2 independently and its predicted activation pattern is collapsed to a `[20,484]` vector. Similarity between two stimuli is computed as Pearson correlation between their collapsed responses, restricted to the vertices of a given ICA network. This directly mirrors the spatial Pearson correlation used by the TRIBE v2 paper (sections 2.5, 2.6, 5.10) for comparing predicted maps against ground-truth maps — we apply the same metric to compare two predicted maps against each other.
 - **ICA network masks computed from model weights**: The five ICA network masks are derived by running FastICA on TRIBE v2's "unseen subject" projection layer — a `(2048, 20,484)` matrix embedded in `best.ckpt`. The 2,048 dimension is the `low_rank_head` bottleneck (confirmed in `config.yaml`: `low_rank_head: 2048`); the transformer hidden dimension is 1,152 but the subject layer operates on the low-rank projection. The HuggingFace repo contains only `best.ckpt` and `config.yaml` — no pre-computed mask files. At initialization, `ICANetworkAtlas` loads the model weights, extracts the unseen-subject layer, runs `sklearn.decomposition.FastICA(n_components=5)`, and thresholds each component at the top 10% of absolute values to produce binary vertex masks (~2,048 vertices each). This is a one-time computation cached locally.
@@ -31,9 +31,7 @@ graph TD
         A[IBC Stimuli<br/>images + audio + text] --> B[remote_inference.ipynb]
         B --> C[TRIBE v2<br/>TribeModel.predict]
         C --> D1[raw_cortical.npy<br/>T × 20484]
-        C --> D2[raw_subcortical.npy<br/>T × 8802]
         D1 --> GD[(Google Drive Cache)]
-        D2 --> GD
         A --> GD
     end
 
@@ -67,7 +65,7 @@ The boundary between the two is the Google Drive cache directory. Once raw tenso
 | Component | Environment | Responsibility |
 |---|---|---|
 | `remote_inference.ipynb` | Colab | Clones repo, downloads IBC stimuli, runs TRIBE v2 inference, saves raw tensors to Google Drive with resume-from-checkpoint |
-| `StimulusRunner` | Colab | Calls TRIBE v2 API per stimulus, returns raw `Brain_Response` (cortical + subcortical) |
+| `StimulusRunner` | Colab | Calls TRIBE v2 API per stimulus, returns raw `Brain_Response` (cortical only; subcortical checkpoint not publicly released) |
 | `TemporalCollapser` | Local | Reduces cortical `[T, 20,484]` → `[20,484]` via peak (≤10s) or GLM+HRF (>10s); result cached locally alongside raw tensors |
 | `ResponseCache` | Both | Colab writes raw tensors; local reads raw tensors and writes/reads collapsed responses |
 | `ICANetworkAtlas` | Local | Loads and exposes the five ICA network vertex masks (~2,048 vertices each) from HuggingFace |
@@ -125,14 +123,13 @@ Cell 1 — Setup
   - pip install tribev2 + dependencies
   - huggingface-cli login (for gated Llama 3.2 access)
 
-Cell 2 — Load models
+Cell 2 — Load cortical model
   - cortical_model = TribeModel.from_pretrained("facebook/tribev2", cache_folder=CACHE_FOLDER)
-  - subcortical_model = TribeModel.from_pretrained("facebook/tribev2", cache_folder=CACHE_FOLDER,
-      config_update={"data.neuro.projection": {"name": "MaskProjector", "mask": "subcortical", "=replace=": True}, "data.neuro.fwhm": 6.0})
+  - (No subcortical model: checkpoint not publicly released.)
 
-Cell 3 — Download IBC stimuli
+Cell 3 — Build IBC stimulus manifest
   - Clone https://github.com/individual-brain-charting/public_protocols
-  - Download FaceBody/Visu images and language clips
+  - Pre-convert JPG exemplars to 1s static MP4s via ffmpeg (TRIBE v2 rejects .jpg)
   - Build stimulus manifest (list of all files to process)
 
 Cell 4 — Resume-from-checkpoint inference loop
@@ -140,8 +137,7 @@ Cell 4 — Resume-from-checkpoint inference loop
       hash = content_hash(stimulus)
       if (DRIVE_CACHE / "tensors" / hash / "raw_cortical.npy").exists(): continue  # skip
       cortical_preds, _ = cortical_model.predict(events=df)    # (T, 20484)
-      subcortical_preds, _ = subcortical_model.predict(events=df)  # (T, 8802)
-      save raw_cortical.npy + raw_subcortical.npy to DRIVE_CACHE/tensors/hash/
+      save raw_cortical.npy to DRIVE_CACHE/tensors/hash/
   - Print progress: X processed, Y skipped, Z remaining
   - Note: TemporalCollapser runs locally — Colab only saves raw tensors
 
@@ -160,9 +156,8 @@ Each stimulus is identified by a SHA-256 hash of its file contents. Before runni
 **Data volumes:**
 - IBC corpus: ~100-150 images + ~30-40 audio/language clips (no local copies — referenced via GitHub URLs)
 - Raw cortical tensors (Colab writes): ~60 MB total
-- Raw subcortical tensors (Colab writes): ~20 MB total
 - Collapsed tensors (local, generated on first use): ~15 MB total
-- Total cache: ~95 MB — well within Google Drive free 15 GB
+- Total cache: ~75 MB — well within Google Drive free 15 GB
 - Estimated inference time on Colab Pro A100: ~5 minutes for full corpus
 
 **Google Drive path structure:**
@@ -172,11 +167,9 @@ MyDrive/
     ├── manifest.json          # stimulus registry (see below)
     └── tensors/
         ├── <sha256_hash_1>/
-        │   ├── raw_cortical.npy      # (T, 20484) float32 — written by Colab
-        │   └── raw_subcortical.npy   # (T, 8802) float32  — written by Colab
+        │   └── raw_cortical.npy      # (T, 20484) float32 — written by Colab
         ├── <sha256_hash_2>/
-        │   ├── raw_cortical.npy
-        │   └── raw_subcortical.npy
+        │   └── raw_cortical.npy
         └── ...
 ```
 
@@ -186,7 +179,6 @@ After syncing to local Mac, `ResponseCache` adds `collapsed.npy` on first use:
 ```
 tensors/<sha256_hash_1>/
 ├── raw_cortical.npy      # from Colab
-├── raw_subcortical.npy   # from Colab
 └── collapsed.npy         # generated locally by TemporalCollapser, cached
 ```
 
@@ -221,23 +213,23 @@ class StimulusRunner:
     def __init__(
         self,
         cortical_model: TribeModel,    # default facebook/tribev2
-        subcortical_model: TribeModel, # configured with MaskProjector(mask="subcortical")
     ) -> None: ...
 
     def run(self, stimulus: Stimulus) -> BrainResponse:
         """
-        Runs the stimulus through both the cortical and subcortical models
-        independently. Each is a separate get_events_dataframe() + predict() call.
+        Runs the stimulus through the cortical model via one
+        get_events_dataframe() + predict() call.
 
         Cortical model: TribeModel.from_pretrained("facebook/tribev2")
           → preds shape (n_timesteps, 20484)
-        Subcortical model: configured with MaskProjector(mask="subcortical")
-          → preds shape (n_timesteps, 8802)
 
-        Isolation is achieved by separate predict() calls per stimulus —
-        the TRIBE v2 API enforces single-stimulus input (get_events_dataframe
-        accepts exactly one path), and predict() discards empty segments by
-        default, so stimuli never contaminate each other.
+        (A subcortical path existed in the paper but the corresponding
+        checkpoint is not published on HuggingFace; see Key Design Decisions.)
+
+        Isolation is achieved because the TRIBE v2 API enforces single-stimulus
+        input (get_events_dataframe accepts exactly one path), and predict()
+        discards empty segments by default, so stimuli never contaminate
+        each other.
         """
 ```
 
@@ -350,16 +342,15 @@ class ResponseCache:
     def get_collapsed(self, stimulus: Stimulus) -> np.ndarray | None:
         """Returns cached Collapsed_Response [20484] or None."""
 
-    def get_raw(self, stimulus: Stimulus) -> tuple[np.ndarray, np.ndarray] | None:
-        """Returns (raw_cortical, raw_subcortical) or None."""
+    def get_raw(self, stimulus: Stimulus) -> np.ndarray | None:
+        """Returns raw_cortical or None."""
 
     def put_raw(
         self,
         stimulus: Stimulus,
         raw_cortical: np.ndarray,    # (n_timesteps, 20484) float32 — written by Colab
-        raw_subcortical: np.ndarray, # (n_timesteps, 8802) float32  — written by Colab
     ) -> None:
-        """Saves raw tensors to <cache_dir>/tensors/<content_hash>/raw_*.npy"""
+        """Saves raw_cortical to <cache_dir>/tensors/<content_hash>/raw_cortical.npy"""
 
     def put_collapsed(
         self,
@@ -372,7 +363,7 @@ class ResponseCache:
         """SHA-256 of the raw bytes of all modality inputs."""
 ```
 
-Serialization uses `numpy.save()` / `numpy.load()` with `.npy` format, which preserves float32 precision exactly. Both tensors are stored together under a per-stimulus subdirectory keyed by content hash.
+Serialization uses `numpy.save()` / `numpy.load()` with `.npy` format, which preserves float32 precision exactly. Each stimulus has its own subdirectory keyed by content hash.
 
 ### `ValidationSuite`
 
@@ -416,9 +407,9 @@ class ICAMode(Enum):
 
 @dataclass
 class BrainResponse:
-    """Raw output from StimulusRunner — both model runs preserved for future use."""
+    """Raw output from StimulusRunner (cortical model only; subcortical
+    checkpoint is not publicly released)."""
     cortical: np.ndarray        # shape (n_timesteps, 20484) float32 — from cortical model
-    subcortical: np.ndarray     # shape (n_timesteps, 8802) float32  — from subcortical model
     segments: list              # TRIBE v2 segment objects aligned with cortical
 
 

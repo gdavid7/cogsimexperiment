@@ -66,10 +66,6 @@ def _random_raw_cortical(seed: int, T: int = 6) -> np.ndarray:
     return np.random.default_rng(seed).standard_normal((T, N_VERTICES)).astype(np.float32)
 
 
-def _random_raw_subcortical(seed: int, T: int = 6) -> np.ndarray:
-    return np.random.default_rng(seed).standard_normal((T, 8802)).astype(np.float32)
-
-
 # ---------------------------------------------------------------------------
 # Hypothesis strategies
 # ---------------------------------------------------------------------------
@@ -566,8 +562,8 @@ def test_integration_compare_with_prepopulated_cache(
     rng = np.random.default_rng(0)
     raw_a = rng.standard_normal((6, N_VERTICES)).astype(np.float32)
     raw_b = rng.standard_normal((6, N_VERTICES)).astype(np.float32)
-    cache.put_raw(stim_a, raw_a, np.zeros((6, 8802), dtype=np.float32))
-    cache.put_raw(stim_b, raw_b, np.zeros((6, 8802), dtype=np.float32))
+    cache.put_raw(stim_a, raw_a)
+    cache.put_raw(stim_b, raw_b)
 
     result = facade.compare(stim_a, stim_b)
 
@@ -598,7 +594,7 @@ def test_integration_cache_population_and_retrieval(
     # Write raw cortical (no collapsed yet)
     rng = np.random.default_rng(1)
     raw = rng.standard_normal((6, N_VERTICES)).astype(np.float32)
-    cache.put_raw(stim, raw, np.zeros((6, 8802), dtype=np.float32))
+    cache.put_raw(stim, raw)
 
     collapse_call_count = 0
     original_collapse = facade._collapser.collapse

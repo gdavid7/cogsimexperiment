@@ -58,8 +58,8 @@ tests/                        # Test suite
 
 ### Data & Caching Layer
 - **cache.py**: Disk-based response storage
-  - Raw responses: `{stimulus_id}_raw.npz` (cortical + subcortical)
-  - Collapsed responses: `{stimulus_id}_collapsed.npy`
+  - Raw cortical: `tensors/<hash>/raw_cortical.npy` (T, 20484)
+  - Collapsed: `tensors/<hash>/collapsed.npy` (20484,)
   - Avoids re-inference for repeated queries
 
 - **models.py**: Type-safe data structures

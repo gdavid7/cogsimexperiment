@@ -165,7 +165,7 @@ def test_get_raw_returns_none_when_not_cached(tmp_path):
 
 
 def test_put_get_raw_round_trip(tmp_path):
-    """put_raw / get_raw preserves cortical and subcortical tensors."""
+    """put_raw / get_raw preserves the cortical tensor."""
     cache = ResponseCache(str(tmp_path))
     stim_file = tmp_path / "stim.bin"
     stim_file.write_bytes(b"raw-test")
@@ -173,15 +173,12 @@ def test_put_get_raw_round_trip(tmp_path):
 
     rng = np.random.default_rng(42)
     cortical = rng.random((5, 20484), dtype=np.float32)
-    subcortical = rng.random((5, 8802), dtype=np.float32)
 
-    cache.put_raw(stimulus, cortical, subcortical)
-    result = cache.get_raw(stimulus)
+    cache.put_raw(stimulus, cortical)
+    loaded = cache.get_raw(stimulus)
 
-    assert result is not None
-    loaded_cortical, loaded_subcortical = result
-    np.testing.assert_array_equal(loaded_cortical, cortical)
-    np.testing.assert_array_equal(loaded_subcortical, subcortical)
+    assert loaded is not None
+    np.testing.assert_array_equal(loaded, cortical)
 
 
 def test_get_collapsed_returns_none_on_corrupted_file(tmp_path, caplog):

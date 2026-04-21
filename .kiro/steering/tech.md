@@ -57,8 +57,7 @@ rm -rf build/ dist/ *.egg-info __pycache__/ .pytest_cache/
 
 ## Key Technical Notes
 
-- **Cortical response shape**: (n_timesteps, 20484) float32
-- **Subcortical response shape**: (n_timesteps, 8802) float32
+- **Cortical response shape**: (n_timesteps, 20484) float32 — only response the public TRIBE v2 checkpoint produces; subcortical variant is not released
 - **Collapsed response shape**: (20484,) float32
 - **ICA projection matrix**: (2048, 20484) for 5 networks
 - **Cache format**: NumPy .npz files for raw/collapsed responses

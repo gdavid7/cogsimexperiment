@@ -14,7 +14,7 @@ The pipeline:
 
 Supports video, audio, and text stimuli. Two ICA modes: binary mask (top 10% vertices) and continuous weighting. Disk cache for raw and collapsed responses.
 
-**Why cortical, not semantic:** cortical similarity captures *how it is to experience* a stimulus (visual rhythm, auditory texture, cognitive load, cross-modal convergence) — things semantic embeddings miss. Subcortical responses are cached but excluded from similarity (lower prediction quality, and they represent memory/emotion/reward, not perceptual representation).
+**Why cortical, not semantic:** cortical similarity captures *how it is to experience* a stimulus (visual rhythm, auditory texture, cognitive load, cross-modal convergence) — things semantic embeddings miss. Subcortical prediction is out of scope: the TRIBE v2 paper describes a subcortical variant, but Meta has not published that checkpoint on HuggingFace (`facebook/tribev2` ships only the cortical `best.ckpt` hard-wired to TribeSurfaceProjector / fsaverage5).
 
 Use cases: content recommendation, stimulus validation for neuroscience, brain-grounded semantic search.
 
@@ -29,11 +29,10 @@ Install: `pip install -e ".[dev]"` then install TRIBE v2 separately.
 Test: `pytest` / `pytest tests/test_facade.py -v`.
 
 **Shapes to remember:**
-- Cortical response: `(T, 20484)` float32
-- Subcortical response: `(T, 8802)` float32 (cached, not used for similarity)
+- Cortical response: `(T, 20484)` float32 — only response TRIBE v2's public checkpoint produces
 - Collapsed cortical: `(20484,)` float32
 - ICA projection matrix: `(2048, 20484)` for 5 networks
-- Cache files: `.npy` / `.npz` under `tensors/<content_hash>/`
+- Cache files: `.npy` under `tensors/<content_hash>/` (`raw_cortical.npy`, `collapsed.npy`)
 
 No mypy / pyright configured. Hypothesis DB lives in `.hypothesis/`.
 
