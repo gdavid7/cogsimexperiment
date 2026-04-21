@@ -196,34 +196,63 @@ class ICANetworkAtlas:
 
     @staticmethod
     def _find_projection_tensor(state_dict: dict) -> np.ndarray:
-        """Search the state dict for a weight tensor of shape (2048, 20484)."""
-        target_shape = PROJECTION_SHAPE
-        candidates = []
-        for key, tensor in state_dict.items():
-            if hasattr(tensor, "shape") and tuple(tensor.shape) == target_shape:
-                candidates.append((key, tensor))
+        """Find the unseen-subject projection in the checkpoint.
 
-        if not candidates:
+        Per TRIBEv2.pdf §5.3, the subject block is a tensor of shape
+        (S, D_bottleneck, N_targets). In the public checkpoint the
+        unseen-subject head is stored with S=1 (a single row) as
+        ``model.predictor.weights`` of shape (1, 2048, 20484); we squeeze
+        the leading axis to obtain the (2048, 20484) matrix the design
+        describes. For robustness we accept either exact (2048, 20484)
+        or the (1, 2048, 20484) layout.
+        """
+        target_2d = PROJECTION_SHAPE
+        target_3d = (1,) + target_2d
+        candidates_2d: list[tuple[str, object]] = []
+        candidates_3d: list[tuple[str, object]] = []
+        for key, tensor in state_dict.items():
+            if not hasattr(tensor, "shape"):
+                continue
+            shape = tuple(tensor.shape)
+            if shape == target_2d:
+                candidates_2d.append((key, tensor))
+            elif shape == target_3d:
+                candidates_3d.append((key, tensor))
+
+        if candidates_2d:
+            candidates = candidates_2d
+            squeeze = False
+        elif candidates_3d:
+            candidates = candidates_3d
+            squeeze = True
+        else:
             available = [
                 f"{k}: {tuple(v.shape)}"
                 for k, v in state_dict.items()
                 if hasattr(v, "shape")
             ]
             raise ValueError(
-                f"Could not find a tensor of shape {target_shape} in the checkpoint. "
-                f"Available tensors:\n" + "\n".join(available[:30])
+                f"Could not find a projection tensor of shape {target_2d} "
+                f"or {target_3d} in the checkpoint. Available tensors:\n"
+                + "\n".join(available[:30])
             )
 
         if len(candidates) > 1:
             log.warning(
-                "Multiple tensors of shape %s found: %s. Using the first.",
-                target_shape,
+                "Multiple candidate projection tensors found: %s. Using the first.",
                 [k for k, _ in candidates],
             )
 
         key, tensor = candidates[0]
-        log.info("ICANetworkAtlas: using projection tensor '%s' of shape %s", key, target_shape)
-        return tensor.float().numpy()
+        arr = tensor.float().numpy()
+        if squeeze:
+            arr = arr.squeeze(axis=0)
+        log.info(
+            "ICANetworkAtlas: using projection tensor '%s' -> shape %s",
+            key,
+            arr.shape,
+        )
+        return arr
 
     def _save_cache(self) -> None:
         """Save computed components and masks to ica_masks.npz."""
