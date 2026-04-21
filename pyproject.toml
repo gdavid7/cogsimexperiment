@@ -24,14 +24,6 @@ inference = [
     "huggingface-hub>=0.20",
     "transformers>=4.30",
 ]
-
-[project.optional-dependencies]
-inference = [
-    "torch>=2.0",
-    "torchaudio>=2.0",
-    "huggingface-hub>=0.20",
-    "transformers>=4.30",
-]
 dev = [
     "pytest>=8.0",
     "hypothesis>=6.100",

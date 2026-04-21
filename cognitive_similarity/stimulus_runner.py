@@ -2,7 +2,7 @@
 
 try:
     from tribev2 import TribeModel
-except ImportError as _tribev2_import_error:
+except ImportError:
     TribeModel = None  # type: ignore[assignment,misc]
     _TRIBEV2_MISSING_MSG = (
         "tribev2 is required to use StimulusRunner but is not installed. "

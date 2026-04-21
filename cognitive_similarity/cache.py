@@ -2,8 +2,8 @@
 
 import hashlib
 import logging
-import os
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -37,7 +37,7 @@ class ResponseCache:
     # Public API
     # ------------------------------------------------------------------
 
-    def get_collapsed(self, stimulus: Stimulus) -> np.ndarray | None:
+    def get_collapsed(self, stimulus: Stimulus) -> Optional[np.ndarray]:
         """Returns cached Collapsed_Response [20484] or None."""
         path = self._collapsed_path(stimulus)
         if not path.exists():
@@ -50,7 +50,7 @@ class ResponseCache:
         path.parent.mkdir(parents=True, exist_ok=True)
         np.save(path, collapsed.astype(np.float32))
 
-    def get_raw(self, stimulus: Stimulus) -> tuple[np.ndarray, np.ndarray] | None:
+    def get_raw(self, stimulus: Stimulus) -> Optional[tuple[np.ndarray, np.ndarray]]:
         """Returns (raw_cortical, raw_subcortical) or None."""
         h = self._content_hash(stimulus)
         cortical_path = self._tensors_dir / h / "raw_cortical.npy"
@@ -86,7 +86,7 @@ class ResponseCache:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def get_collapsed_by_hash(self, content_hash: str) -> np.ndarray | None:
+    def get_collapsed_by_hash(self, content_hash: str) -> Optional[np.ndarray]:
         """Load collapsed.npy directly by content hash, without needing the stimulus file.
 
         Used by ValidationSuite which already has content hashes from manifest.json.
@@ -114,11 +114,11 @@ class ResponseCache:
         self,
         path: Path,
         *,
-        expected_shape: tuple | None = None,
-        expected_ndim: int | None = None,
-        expected_last_dim: int | None = None,
+        expected_shape: Optional[tuple] = None,
+        expected_ndim: Optional[int] = None,
+        expected_last_dim: Optional[int] = None,
         label: str = "tensor",
-    ) -> np.ndarray | None:
+    ) -> Optional[np.ndarray]:
         """Load a .npy file, returning None (with WARNING) on any error."""
         try:
             arr = np.load(path)
