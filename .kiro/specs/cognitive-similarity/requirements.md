@@ -143,6 +143,11 @@ Semantic similarity — as produced by language embedding models — captures wh
 
 4. THE System SHALL NOT define expected orderings for the Default Mode Network, as the paper does not run a direct DMN localizer experiment that would provide ground truth for pairwise similarity ordering.
 5. WHEN the validation suite is executed, THE System SHALL report a pass/fail result per ordering and a summary count of how many orderings hold.
+6. WHEN stimuli for any of the 9 orderings are unavailable in the cache, THE System SHALL mark the corresponding check as skipped (not failed) with a descriptive "MISSING" log entry so that partial-coverage releases remain interpretable.
+
+#### Validation status (as of commit d3faa17)
+
+All 4 Visual System orderings (FFA, PPA, EBA, VWFA) are validated end-to-end on real IBC FaceBody exemplars with the real HuggingFace-loaded ICA atlas (Δ 0.09–0.45 between same-category and cross-category Pearson similarities). The 5 remaining orderings (Primary Auditory Cortex ×2, Language Network ×2, Motion Detection MT+ ×1) are deferred pending stimulus curation — these tasks do not ship media in `public_protocols`, so stimuli must be sourced elsewhere (TRIBEv2.pdf §5.9 notes the authors themselves used Algonauts dataset segments for the Bang auditory contrasts, and translated French to English for RSVPLanguage/EmotionalPain).
 
 ---
 

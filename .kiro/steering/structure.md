@@ -14,15 +14,22 @@ cognitive_similarity/          # Main package
 ├── stimulus_runner.py       # StimulusRunner - TRIBE v2 inference (Colab)
 └── validation.py            # ValidationSuite - correctness validation
 
+scripts/                      # Operational scripts (not part of the package)
+└── validate_ibc.py          # Run ValidationSuite against a synced IBC cache
+
 tests/                        # Test suite
 ├── test_facade.py           # Integration & property tests for facade
 ├── test_similarity_engine.py # Property tests for similarity computation
 ├── test_models.py           # Property tests for data models
-├── test_ica_atlas.py        # Tests for ICA network atlas
+├── test_ica_atlas.py        # Tests for ICA network atlas (synthetic projection only)
 ├── test_collapsing.py       # Tests for temporal collapsing
 └── test_cache.py            # Tests for caching system
 
-.kiro/                        # Kiro configuration
+remote_inference.ipynb        # Colab-side inference pipeline
+demo.ipynb                    # Local exploration with synthetic data
+TRIBEv2.pdf                   # Primary research source (read-only)
+
+.kiro/                        # Kiro configuration (spec-driven-development)
 ├── specs/                   # Feature specifications
 │   └── cognitive-similarity/ # Current feature spec
 └── steering/                # AI assistant guidance (this file)

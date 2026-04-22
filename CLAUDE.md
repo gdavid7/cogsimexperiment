@@ -31,7 +31,7 @@ Test: `pytest` / `pytest tests/test_facade.py -v`.
 **Shapes to remember:**
 - Cortical response: `(T, 20484)` float32 — only response TRIBE v2's public checkpoint produces
 - Collapsed cortical: `(20484,)` float32
-- ICA projection matrix: `(2048, 20484)` for 5 networks
+- ICA projection: stored in `best.ckpt` as `model.predictor.weights` of shape `(1, 2048, 20484)` — the leading singleton is the subject axis (S=1, unseen-subject mode); `ICANetworkAtlas` squeezes it to `(2048, 20484)` before running FastICA
 - Cache files: `.npy` under `tensors/<content_hash>/` (`raw_cortical.npy`, `collapsed.npy`)
 
 No mypy / pyright configured. Hypothesis DB lives in `.hypothesis/`.
@@ -49,7 +49,11 @@ cognitive_similarity/       # Main package
 ├── cache.py               # ResponseCache — disk-based
 ├── stimulus_runner.py     # TRIBE v2 inference (Colab-only, GPU)
 └── validation.py          # ValidationSuite
+scripts/                   # Operational scripts
+└── validate_ibc.py        # Run ValidationSuite against a synced IBC cache
 tests/                     # One test file per module; property tests via Hypothesis
+remote_inference.ipynb     # Colab-side inference pipeline (model load → manifest → inference → cache)
+demo.ipynb                 # Local exploration notebook using synthetic data
 .kiro/specs/cognitive-similarity/   # Authoritative specs (see below)
 TRIBEv2.pdf                # Primary research source
 ```
@@ -58,7 +62,28 @@ Facade: `compare(a, b) → SimilarityResult`, `rank(query, corpus) → RankedRes
 
 Architectural patterns: facade (CognitiveSimilarity), strategy (collapsing), cache-aside, dependency injection (atlas + cache into facade for testability).
 
-Inference is split: Colab notebook runs TRIBE v2 on GPU and populates the cache; local Mac library does all analysis against cached responses.
+## End-to-end Workflow
+
+Inference is split across two environments:
+
+1. **Colab (`remote_inference.ipynb`)** — loads TRIBE v2 on GPU, preconverts stimulus JPGs to 10 s static MP4s with ffmpeg (matching `tribev2.eventstransforms.CreateVideosFromImages` defaults: `fps=10`, `libx264`, no audio), runs inference, writes `raw_cortical.npy` per stimulus under `tensors/<content_hash>/` on Google Drive.
+2. **Local Mac** — sync the Drive cache to the Mac, then run `python scripts/validate_ibc.py --cache-dir <cache>` to materialize `collapsed.npy` (peak extraction at t+5 s) and run `ValidationSuite` against the real HuggingFace-loaded ICA atlas.
+
+Stimulus duration is **10 s per static video** (deviation from TRIBEv2.pdf §5.9's 1 s cited for the paper's streamed-GLM protocol). Rationale: single-stimulus inference needs enough timepoints for TRIBE's output to reach the t+5 s hemodynamic peak (§5.8); a 1-s input gives T=1 and the collapser falls back to the earliest timepoint with badly compressed Δs (0.01–0.05), whereas 10 s gives T≈10 and lets the collapser take `cortical_response[5]` with meaningful Δs (0.09–0.45).
+
+## Validation Status (as of commit d3faa17)
+
+End-to-end validated on 8 IBC FaceBody exemplars:
+
+| Check | Networks | Status |
+|---|---|---|
+| sim(face,face) > sim(face,place) | Visual System (FFA) | ✓ PASS (Δ 0.45) |
+| sim(place,place) > sim(place,body) | Visual System (PPA) | ✓ PASS (Δ 0.33) |
+| sim(body,body) > sim(body,face) | Visual System (EBA) | ✓ PASS (Δ 0.31) |
+| sim(wc,wc) > sim(wc,place) | Visual System (VWFA) | ✓ PASS (Δ 0.09) |
+| Auditory / Language / MT+ checks (5) | — | SKIPPED — stimuli not yet curated |
+
+4 / 9 checks pass; the 5 skipped checks await auditory/language/MT+ stimulus curation (see requirements.md §5 for the remaining orderings).
 
 ## Code Conventions
 
