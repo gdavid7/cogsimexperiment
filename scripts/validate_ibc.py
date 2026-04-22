@@ -38,12 +38,33 @@ from cognitive_similarity.collapsing import TemporalCollapser    # noqa: E402
 from cognitive_similarity.validation import ValidationSuite      # noqa: E402
 
 
+def _stimulus_from_manifest(entry: dict) -> Stimulus:
+    """Build a Stimulus with the right modality field populated.
+
+    The modality tag comes from the manifest ("image"/"video" both map to
+    video_path since the Colab/Modal pipeline converts images to static MP4s
+    before inference; "audio" maps to audio_path; "text" to text_path).
+    TemporalCollapser itself only reads stimulus.duration_s, so the choice
+    matters for semantic correctness, not for collapsing.
+    """
+    modality = entry.get("modality", "video")
+    kwargs: dict = {"stimulus_id": entry["stimulus_id"]}
+    path = entry.get("local_path") or entry.get("source_path") or "(unknown)"
+    if modality == "audio":
+        kwargs["audio_path"] = path
+    elif modality == "text":
+        kwargs["text_path"] = path
+    else:
+        kwargs["video_path"] = path
+    return Stimulus(**kwargs)
+
+
 def _materialize_collapsed(cache_dir: Path, manifest: list[dict]) -> None:
     """Compute collapsed.npy from raw_cortical.npy for any entry that lacks one.
 
     Duration is left unset so TemporalCollapser infers it from T * tr_s;
     this keeps the script correct for any stimulus length without
-    hardcoding assumptions from the Colab-side MP4 duration.
+    hardcoding assumptions from the Colab/Modal-side preprocessing.
     """
     collapser = TemporalCollapser()
     for entry in manifest:
@@ -57,10 +78,7 @@ def _materialize_collapsed(cache_dir: Path, manifest: list[dict]) -> None:
             print(f"  {entry['stimulus_id']:<25}  SKIPPED — missing raw_cortical.npy")
             continue
         raw = np.load(raw_path)
-        stim = Stimulus(
-            video_path=entry["local_path"],
-            stimulus_id=entry["stimulus_id"],
-        )
+        stim = _stimulus_from_manifest(entry)
         collapsed = collapser.collapse(raw, stim, tr_s=1.0)
         np.save(collapsed_path, collapsed.astype(np.float32))
         print(f"  {entry['stimulus_id']:<25}  raw {raw.shape} -> collapsed {collapsed.shape}")
