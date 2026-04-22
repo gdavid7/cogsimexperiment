@@ -25,10 +25,17 @@ from pathlib import Path
 
 import numpy as np
 
-from cognitive_similarity import CognitiveSimilarity, Stimulus
-from cognitive_similarity.cache import ResponseCache
-from cognitive_similarity.collapsing import TemporalCollapser
-from cognitive_similarity.validation import ValidationSuite
+# Make `cognitive_similarity` importable without a prior `pip install -e .`,
+# so the script runs cleanly from a throwaway venv that only has the
+# runtime deps (torch, huggingface_hub, sklearn, nilearn, pandas).
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from cognitive_similarity import CognitiveSimilarity, Stimulus  # noqa: E402
+from cognitive_similarity.cache import ResponseCache             # noqa: E402
+from cognitive_similarity.collapsing import TemporalCollapser    # noqa: E402
+from cognitive_similarity.validation import ValidationSuite      # noqa: E402
 
 
 def _materialize_collapsed(cache_dir: Path, manifest: list[dict]) -> None:
