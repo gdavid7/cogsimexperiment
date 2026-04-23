@@ -205,13 +205,31 @@ def _classify(stat: dict) -> str:
     return "ordering only (mask ≈ random)"
 
 
+def _fmt_p(p: float) -> str:
+    """Uniform one-sided permutation-p formatter used in the output table."""
+    if p < 0.001:
+        return "<0.001"
+    if p > 0.999:
+        return ">0.999"
+    return f"{p:.3f}"
+
+
 def _run_significance(
     atlas: ICANetworkAtlas,
     cache: ResponseCache,
     manifest: list[dict],
     report,
 ) -> None:
-    """Post-process ValidationSuite results with significance tests per check."""
+    """Post-process ValidationSuite results with significance tests per check.
+
+    Slice 5 F1: apply Benjamini-Hochberg FDR (Benjamini & Hochberg 1995) to
+    the permutation p-values across all checks. The one-sided permutation
+    tests whether each mask beats a random same-size vertex subset; running
+    K simultaneous tests without correction inflates the family-wise error
+    rate. We report both raw p and BH-corrected q in the output.
+    """
+    from statsmodels.stats.multitest import multipletests
+
     id_to_hash = {e["stimulus_id"]: e["content_hash"] for e in manifest}
 
     def _load(stimulus_id: str) -> np.ndarray | None:
@@ -224,39 +242,68 @@ def _run_significance(
     print("Null (A): random-mask permutation (n=1000) — does the ICA mask beat a")
     print("          random same-size vertex subset? perm_p < 0.05 → yes.")
     print("Null (B): vertex bootstrap (n=1000) within the mask — 95% CI on Δ.")
-    print("          CI excluding zero → Δ is a stable non-zero estimate.\n")
+    print("          CI excluding zero → Δ is a stable non-zero estimate.")
+    print("Multiple-comparison: Benjamini-Hochberg FDR applied to perm p-values")
+    print("          across all checks; q<0.05 → mask-specificity survives FDR.\n")
 
-    n_mask_specific = 0
-    n_ordering_ok = 0
+    # Stage 1: compute all per-check stats first so we can FDR-correct
+    # across the whole batch.
+    per_check: list[tuple] = []  # (check, stat_dict | None)
     for c in report.checks:
         a1, a2 = c.pair_a
         b1, b2 = c.pair_b
         tensors = [_load(sid) for sid in (a1, a2, b1, b2)]
         if any(t is None for t in tensors):
-            print(f"  [SKIP] {c.description}  (missing collapsed tensors)")
+            per_check.append((c, None))
             continue
         resp_a1, resp_a2, resp_b1, resp_b2 = tensors
-        stat = _significance_test(atlas, c.network, resp_a1, resp_a2, resp_b1, resp_b2)
-        verdict = _classify(stat)
+        stat = _significance_test(
+            atlas, c.network, resp_a1, resp_a2, resp_b1, resp_b2
+        )
+        per_check.append((c, stat))
+
+    # Stage 2: FDR across non-missing perm p-values.
+    valid_ps = [stat["perm_p"] for _, stat in per_check if stat is not None]
+    if valid_ps:
+        _, q_values, _, _ = multipletests(valid_ps, alpha=0.05, method="fdr_bh")
+        q_iter = iter(q_values.tolist())
+    else:
+        q_iter = iter(())
+
+    # Stage 3: report per-check
+    n_mask_specific = 0
+    n_ordering_ok = 0
+    for c, stat in per_check:
+        if stat is None:
+            print(f"  [SKIP] {c.description}  (missing collapsed tensors)")
+            continue
+        q_val = next(q_iter)
+        ci_lo, ci_hi = stat["bootstrap_ci"]
+        # Classify using FDR-corrected q (not raw p) so the mask-specific
+        # designation is multiple-comparison-safe.
+        verdict_stat = {**stat, "perm_p": q_val}
+        verdict = _classify(verdict_stat)
         if verdict == "ordering + mask-specific":
             n_mask_specific += 1
             n_ordering_ok += 1
         elif verdict == "ordering only (mask ≈ random)":
             n_ordering_ok += 1
-        ci_lo, ci_hi = stat["bootstrap_ci"]
-        perm_p = stat["perm_p"]
-        p_str = "<0.001" if perm_p < 0.001 else (">0.999" if perm_p > 0.999 else f"{perm_p:.3f}")
         print(
             f"  [{verdict:<32}] Δ={stat['delta']:+.3f}   "
-            f"perm p={p_str:>6}   "
+            f"perm p={_fmt_p(stat['perm_p']):>6}   "
+            f"BH q={_fmt_p(q_val):>6}   "
             f"boot CI=[{ci_lo:+.3f}, {ci_hi:+.3f}]"
         )
         print(f"    {c.description}")
 
-    total_real = sum(1 for c in report.checks if "MISSING" not in c.description)
-    print(f"\n  → {n_ordering_ok}/{total_real} checks have positive Δ with stable bootstrap CI.")
-    print(f"  → {n_mask_specific}/{total_real} of those also show mask-specific selectivity "
-          f"(ICA mask beats random).")
+    total_real = sum(1 for c, s in per_check if s is not None)
+    print(
+        f"\n  → {n_ordering_ok}/{total_real} checks have positive Δ with stable bootstrap CI."
+    )
+    print(
+        f"  → {n_mask_specific}/{total_real} of those also show mask-specific "
+        "selectivity at BH q<0.05 (FDR-corrected)."
+    )
 
 
 def main() -> int:

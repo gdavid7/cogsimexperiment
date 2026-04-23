@@ -199,3 +199,62 @@ Implement the Cognitive Similarity library in Python, split across two environme
 - Tag each property test: `# Feature: cognitive-similarity, Property N: <property_text>`
 - The Colab notebook (task 10) and demo notebook (task 13) can be done in parallel with or after the local library tasks
 - `StimulusRunner` is only used in Colab — local library reads raw tensors from cache written by Colab
+
+---
+
+## 2026-04-23 Addendum — Paper-alignment sweep (Slices 1–5)
+
+After an independent audit surfaced several paper-vs-implementation gaps,
+a five-slice correction pass landed between commits `ad5844e` and the
+current HEAD. Each slice is one atomic commit with tests + rationale in
+the commit message; summarized here for future readers.
+
+- **Slice 1 · Robustness (commit `ad5844e`)**:
+  G1 tighten `_find_projection_tensor` to prefer `.predictor.weights` key;
+  G2 pin IBC `public_protocols` to commit `cbbb7715`;
+  G3(a) remove broken `local_path` consumption in `_stimulus_from_manifest`;
+  F2 document the spatial-autocorrelation caveat on the bootstrap CI.
+  No validation-numbers impact.
+
+- **Slice 2 · ICA correctness (commits `943d30a` + `d2aa5b6`)**:
+  F3 bump `FastICA(max_iter)` so the real checkpoint actually converges
+  (~3998 iterations needed; raises on cap-hit); A1/A2/A3 implement the
+  full §5.10 NeuroSynth-based label assignment — fetch term maps via
+  NiMARE, project to fsaverage5 via `nilearn.vol_to_surf`, Hungarian
+  match on |Pearson r|, sign-flip negatively-matched components,
+  persist assignment + provenance in `ica_masks.npz`. Fixes the
+  audit's top finding (positional labels contradicting §5.10's
+  "order does not carry meaning for ICA").
+
+- **Slice 3 · Stimulus protocol (commit `d0d4204`)**:
+  C1 switch all preprocessors to 1 s stimulus + 7 s blank = 8 s (matches
+  §5.9 "one second every eight seconds"); C2 drop MT+ exemplars +
+  `biomvt_mp4` src_kind (no paper §5.9 protocol for motion); C3 thread
+  `duration_s=8.0` through the manifest; D1 swap `non_speech_01` from
+  `s2_tools_1.wav` to `s2_animal_1.wav` to match Fig 5B "[woof woof]";
+  D2 prune 9 orphaned exemplars; B3(a) drop three validation checks
+  whose paper mapping was indirect (audio>silence, complex>simple,
+  motion>static). 23 → 14 exemplars; 9 → 6 checks. Modal re-inference
+  required to regenerate `raw_cortical.npy` against the new content hashes.
+
+- **Slice 4 · Weighted-Pearson fix + paper replication (commit `80805a3`)**:
+  E1 replace continuous-ICA-mode's sqrt-whitening heuristic with
+  standard weighted Pearson (weighted mean + weighted covariance;
+  uniform weights collapse to plain Pearson). B2 add the `paper_replication`
+  module + `replicate_figure_4e.py` CLI — direct §5.9 contrast-map
+  methodology as a paper-faithful sanity check separate from the novel
+  pairwise-similarity metric.
+
+- **Slice 5 · FDR + docs (pending commit)**:
+  F1 apply Benjamini-Hochberg FDR across all permutation p-values in
+  `validate_ibc.py`; B1 rewrite docs that overclaimed "mirrors the
+  paper" framing — our pairwise construction reuses the §5.10 metric
+  for a different question than the paper validates; updated every
+  `.md` file (README, CLAUDE, requirements, design, tasks, product,
+  tech, structure) to reflect Slice 1–4 changes.
+
+Tests grew from 83 → 110 across the sweep. The `ConvergenceWarning`
+that still emits from `test_property_5_ica_network_masking_isolation`
+is expected: synthetic random-Gaussian projections have no true
+independent components so FastICA legitimately can't converge on
+them; the test path passes `strict=False` to ICA computation.

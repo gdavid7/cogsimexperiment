@@ -7,25 +7,31 @@ cognitive_similarity/          # Main package
 ├── __init__.py               # Public API exports
 ├── models.py                 # Data models (Stimulus, ICANetwork, SimilarityResult, etc.)
 ├── facade.py                 # CognitiveSimilarity - top-level API
-├── similarity_engine.py      # SimilarityEngine - Pearson correlation computation
-├── ica_atlas.py             # ICANetworkAtlas - brain network masks/components
-├── collapsing.py            # TemporalCollapser - temporal response reduction
-├── cache.py                 # ResponseCache - disk-based caching
-├── stimulus_runner.py       # StimulusRunner - TRIBE v2 inference (runs inside Modal worker)
-└── validation.py            # ValidationSuite - correctness validation
+├── similarity_engine.py      # pearson + weighted_pearson + SimilarityEngine
+├── ica_atlas.py              # ICANetworkAtlas — FastICA + §5.10 label assignment
+├── neurosynth_labels.py      # §5.10 NeuroSynth fetch + bipartite label assignment
+├── collapsing.py             # TemporalCollapser - temporal response reduction
+├── cache.py                  # ResponseCache - disk-based caching
+├── stimulus_runner.py        # StimulusRunner - TRIBE v2 inference (runs inside Modal worker)
+├── validation.py             # ValidationSuite - 6 pairwise ordering checks
+└── paper_replication.py      # §5.9 Figure 4E contrast-map methodology
 
 scripts/                      # Operational scripts (not part of the package)
-├── ibc_exemplars.py         # 23-stimulus manifest spec + English translations
-├── run_inference_modal.py   # Modal App + GPU worker; remote TRIBE v2 inference
-└── validate_ibc.py          # Run ValidationSuite against a local cache
+├── ibc_exemplars.py          # 14-stimulus manifest spec + English translations
+├── run_inference_modal.py    # Modal App + GPU worker; remote TRIBE v2 inference
+├── validate_ibc.py           # Run ValidationSuite + FDR-corrected significance
+├── fetch_neurosynth_maps.py  # One-shot §5.10 term-map fetcher (NiMARE)
+└── replicate_figure_4e.py    # Fig 4E contrast-map replication CLI
 
-tests/                        # Test suite
-├── test_facade.py           # Integration & property tests for facade
-├── test_similarity_engine.py # Property tests for similarity computation
-├── test_models.py           # Property tests for data models
-├── test_ica_atlas.py        # Tests for ICA network atlas (synthetic projection only)
-├── test_collapsing.py       # Tests for temporal collapsing
-└── test_cache.py            # Tests for caching system
+tests/                        # Test suite (110 tests)
+├── test_facade.py            # Integration & property tests for facade
+├── test_similarity_engine.py # Pearson + weighted Pearson + SimilarityEngine
+├── test_models.py            # Property tests for data models
+├── test_ica_atlas.py         # Tests for ICA atlas + NeuroSynth integration
+├── test_neurosynth_labels.py # Bipartite assignment + sign-flip correctness
+├── test_paper_replication.py # §5.9 contrast-map formula + localization
+├── test_collapsing.py        # Tests for temporal collapsing
+└── test_cache.py             # Tests for caching system
 
 demo.ipynb                    # Local exploration with synthetic data
 TRIBEv2.pdf                   # Primary research source (read-only)

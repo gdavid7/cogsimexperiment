@@ -17,10 +17,10 @@ The system is designed to be used as a Python library. The primary entry point i
 
 - **Cortical-only, single model**: `TribeModel.from_pretrained("facebook/tribev2")` returns a model hard-wired to TribeSurfaceProjector on fsaverage5, producing `(n_timesteps, 20,484)`. The paper and the library's training grid (`tribev2/grids/run_subcortical.py`) describe a subcortical variant that would produce `(n_timesteps, 8,802)` via `MaskProjector(mask="subcortical")`, but Meta has not released those weights — the HF repo ships only `best.ckpt` + `config.yaml`. This system therefore runs one predict() call per stimulus and caches only the cortical tensor.
 - **Stimulus isolation via separate predict() calls**: Each stimulus is run through TRIBE v2 via its own independent `get_events_dataframe()` + `predict()` call. The TRIBE v2 API already enforces single-stimulus input (`get_events_dataframe()` accepts exactly one path). No manual silence padding is needed — `predict()` automatically discards empty segments (`remove_empty_segments=True` by default), so blank padding would be filtered out anyway. Isolation is achieved simply by never combining stimuli into a single call.
-- **Pairwise Pearson correlation**: Each stimulus is run through TRIBE v2 independently and its predicted activation pattern is collapsed to a `[20,484]` vector. Similarity between two stimuli is computed as Pearson correlation between their collapsed responses, restricted to the vertices of a given ICA network. This directly mirrors the spatial Pearson correlation used by the TRIBE v2 paper (sections 2.5, 2.6, 5.10) for comparing predicted maps against ground-truth maps — we apply the same metric to compare two predicted maps against each other.
-- **ICA network masks computed from model weights**: The five ICA network masks are derived by running FastICA on TRIBE v2's "unseen subject" projection layer. In the paper's notation (§5.3) the subject block is a tensor of shape `(S, D_bottleneck, N_targets)`. In the public `best.ckpt` this is stored as `model.predictor.weights` of shape `(1, 2048, 20,484)` — the leading singleton is the subject axis (S=1 in unseen-subject export), the 2,048 is the `low_rank_head` bottleneck (confirmed in `config.yaml`: `low_rank_head: 2048`), and 20,484 is the fsaverage5 vertex count. `ICANetworkAtlas` squeezes the leading axis to recover the `(2048, 20,484)` matrix, runs `sklearn.decomposition.FastICA(n_components=5)`, and thresholds each component at the top 10% of absolute values to produce binary vertex masks (~2,048 vertices each). This is a one-time computation cached locally at `<cache_dir>/ica_masks.npz`.
+- **Pairwise Pearson correlation (note: not paper-faithful)**: Each stimulus is run through TRIBE v2 independently and its predicted activation pattern is collapsed to a `[20,484]` vector. Similarity between two stimuli is computed as Pearson correlation between their collapsed responses, restricted to the vertices of a given ICA network. The paper uses this metric (§2.5, §2.6, §5.10) to compare *predicted vs. measured (or predicted vs. NeuroSynth-reference) maps*, not between two predicted single-stimulus responses. Our pairwise construction reuses the metric for a different question and is not independently validated by §5.9. For the paper's actual validation methodology, see `cognitive_similarity/paper_replication.py` which implements §5.9's Figure 4E contrast-map procedure directly.
+- **ICA network masks computed from model weights + §5.10 NeuroSynth labeling**: The five ICA network masks are derived by running FastICA on TRIBE v2's "unseen subject" projection layer. In the paper's notation (§5.3) the subject block is a tensor of shape `(S, D_bottleneck, N_targets)`. In the public `best.ckpt` this is stored as `model.predictor.weights` of shape `(1, 2048, 20,484)` — the leading singleton is the subject axis (S=1 in unseen-subject export), the 2,048 is the `low_rank_head` bottleneck (confirmed in `config.yaml`: `low_rank_head: 2048`), and 20,484 is the fsaverage5 vertex count. `ICANetworkAtlas` squeezes the leading axis to recover the `(2048, 20,484)` matrix, runs `sklearn.decomposition.FastICA(n_components=5, max_iter=10_000)` (needs ~3998 iterations to converge on the real checkpoint; a non-converging fit raises RuntimeError rather than caching a seed-dependent result), and thresholds each component at the top 10% of absolute values to produce binary vertex masks (~2,048 vertices each). **Label assignment follows §5.10**: compute |Pearson r| between each component and five NeuroSynth keyword-map references ("primary auditory", "language", "motion", "default network", "visual"), then solve a bipartite 1-to-1 assignment (`scipy.optimize.linear_sum_assignment`) that maximizes total |r|. Components matched to a negatively-correlated reference get sign-flipped. The full artifact — components, masks, label assignment, |r| correlations, sklearn version, and FastICA iteration count — is cached at `<cache_dir>/ica_masks.npz`. NeuroSynth maps themselves come from a separate one-shot fetcher (`scripts/fetch_neurosynth_maps.py`) that uses NiMARE's MKDAChi2 to compute term meta-analyses and projects them to fsaverage5 via `nilearn.surface.vol_to_surf` — this is paper-exact §5.10.
 - **Content-addressed caching**: Both the `Collapsed_Response` and the raw `Brain_Response` timeseries are serialized to disk keyed by a SHA-256 hash of the stimulus input bytes, avoiding redundant TRIBE v2 inference.
-- **10-second static videos for image stimuli**: TRIBE v2's `get_events_dataframe(video_path=...)` rejects `.jpg/.png/...`; the library's undocumented `CreateVideosFromImages` helper describes the canonical conversion (moviepy, `fps=10`, `libx264`, no audio). The paper (§5.9) ran images at 1 s per presentation inside a continuous randomized stream with a GLM fit. For single-stimulus inference we instead generate **10-second** static MP4s per image so TRIBE produces T≈10 timepoints at its 1 Hz output rate. This lets `TemporalCollapser` index `cortical_response[5]` — the hemodynamic peak per §5.8 — rather than falling back to the T=1 earliest timepoint (which empirically yielded correct orderings but Δs compressed by an order of magnitude).
+- **1 s stimulus + 7 s blank = 8 s total (paper-aligned)**: TRIBE v2's `get_events_dataframe(video_path=...)` rejects `.jpg/.png/...`; the library's undocumented `CreateVideosFromImages` helper describes the canonical conversion (moviepy, `fps=10`, `libx264`, no audio). Per paper §5.9 the in-silico protocol presents images "for one second every eight seconds" — we mirror this exactly: 1 s of image content + 7 s of black-frame padding, 8 s total. For audio: 1 s WAV + 7 s silence via ffmpeg's `apad=whole_dur=8`. This gives TRIBE T≈8 timepoints at 1 Hz output and lets `TemporalCollapser` index `cortical_response[5]` — the §5.8 / Fig 4A hemodynamic peak of a true 1 s onset. An earlier revision used 10 s sustained stimuli as a workaround for T=1 fallback behavior; Slice 3 reverted to the paper's actual protocol after the rest of the pipeline matured to support it.
 
 ---
 
@@ -556,19 +556,25 @@ def pearson_correlation(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a_c, b_c) / (norm_a * norm_b))
 ```
 
-### Continuous ICA Weighting
+### Continuous ICA Weighting (standard weighted Pearson)
 
-When `ica_mode=ICAMode.CONTINUOUS_WEIGHTS`, the full ICA component vector is used as per-vertex weights:
+When `ica_mode=ICAMode.CONTINUOUS_WEIGHTS`, similarity is the standard weighted Pearson correlation over all 20,484 vertices with weights `w = |component|`:
 
 ```python
-w = np.abs(ica_atlas.get_component(network))  # shape [20484], absolute values
-w = w / w.sum()                                # normalize to sum to 1
-a_w = response_a * np.sqrt(w)
-b_w = response_b * np.sqrt(w)
-score = pearson_correlation(a_w, b_w)
+def weighted_pearson(a, b, w):
+    w = w / w.sum()                           # normalize
+    a_wm = np.sum(w * a)                      # weighted means
+    b_wm = np.sum(w * b)
+    a_c = a - a_wm; b_c = b - b_wm
+    cov = np.sum(w * a_c * b_c)               # weighted covariance
+    var_a = np.sum(w * a_c ** 2)              # weighted variances
+    var_b = np.sum(w * b_c ** 2)
+    return cov / np.sqrt(var_a * var_b)
+
+score = weighted_pearson(response_a, response_b, np.abs(component))
 ```
 
-This uses all 20,484 vertices, with vertices having stronger ICA component association contributing more to the similarity score.
+With uniform weights this collapses exactly to standard Pearson. An earlier revision used a `sqrt(w) · a` whitening heuristic that approximated this statistic but was not formally a weighted Pearson; Slice 4 (E1) corrected the implementation. Numerical difference was <0.05 in all measured checks — this is a correctness-in-code fix, not a validation-numbers fix.
 
 ### Whole-Cortex Score
 
