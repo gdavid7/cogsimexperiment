@@ -200,14 +200,20 @@ class ICANetworkAtlas:
 
         Per TRIBEv2.pdf §5.3, the subject block is a tensor of shape
         (S, D_bottleneck, N_targets). In the public checkpoint the
-        unseen-subject head is stored with S=1 (a single row) as
-        ``model.predictor.weights`` of shape (1, 2048, 20484); we squeeze
-        the leading axis to obtain the (2048, 20484) matrix the design
-        describes. For robustness we accept either exact (2048, 20484)
-        or the (1, 2048, 20484) layout.
+        unseen-subject head is stored with S=1 as ``model.predictor.weights``
+        of shape (1, 2048, 20484); we squeeze the leading axis to obtain
+        the (2048, 20484) matrix the design describes.
+
+        Selection rule: prefer keys ending in ``.predictor.weights`` (the
+        paper's subject-block location), falling back to any shape match
+        only if no such key exists. This avoids silently picking up an
+        unrelated tensor of the same shape that a future TRIBE release or
+        fine-tune might add.
         """
         target_2d = PROJECTION_SHAPE
         target_3d = (1,) + target_2d
+        preferred_suffix = ".predictor.weights"
+
         candidates_2d: list[tuple[str, object]] = []
         candidates_3d: list[tuple[str, object]] = []
         for key, tensor in state_dict.items():
@@ -237,13 +243,26 @@ class ICANetworkAtlas:
                 + "\n".join(available[:30])
             )
 
-        if len(candidates) > 1:
+        # Prefer the ``.predictor.weights`` key; if no candidate matches,
+        # fall back to the first shape-matching candidate with a warning.
+        preferred = [(k, t) for k, t in candidates if k.endswith(preferred_suffix)]
+        if preferred:
+            if len(preferred) > 1:
+                log.warning(
+                    "Multiple '.predictor.weights' candidates found: %s. Using the first.",
+                    [k for k, _ in preferred],
+                )
+            key, tensor = preferred[0]
+        else:
             log.warning(
-                "Multiple candidate projection tensors found: %s. Using the first.",
+                "No key ending in '%s' matched shape %s; falling back to the first "
+                "shape-matching tensor. Candidates: %s",
+                preferred_suffix,
+                target_2d if not squeeze else target_3d,
                 [k for k, _ in candidates],
             )
+            key, tensor = candidates[0]
 
-        key, tensor = candidates[0]
         arr = tensor.float().numpy()
         if squeeze:
             arr = arr.squeeze(axis=0)

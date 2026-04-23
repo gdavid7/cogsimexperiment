@@ -188,3 +188,63 @@ def test_cache_round_trip(tmp_path) -> None:
             atlas2.get_component(network),
             err_msg=f"Component mismatch after cache round-trip for {network}",
         )
+
+
+# ---------------------------------------------------------------------------
+# _find_projection_tensor — key-name preference
+# ---------------------------------------------------------------------------
+
+
+class _FakeTensor:
+    """Minimal stand-in for torch.Tensor that exposes .shape / .float() / .numpy()."""
+
+    def __init__(self, arr: np.ndarray) -> None:
+        self._arr = arr
+
+    @property
+    def shape(self):
+        return self._arr.shape
+
+    def float(self) -> "_FakeTensor":
+        return self
+
+    def numpy(self) -> np.ndarray:
+        return self._arr
+
+
+def test_find_projection_prefers_predictor_weights_key() -> None:
+    """When multiple tensors match the target shape, prefer the one whose
+    key ends in '.predictor.weights' — the paper-documented subject-block
+    location (TRIBEv2.pdf §5.3).
+    """
+    rng = np.random.default_rng(seed=11)
+    wanted = rng.standard_normal((1, 2048, N_VERTICES)).astype(np.float32)
+    decoy = rng.standard_normal((1, 2048, N_VERTICES)).astype(np.float32)
+
+    state_dict = {
+        "some.other.decoy": _FakeTensor(decoy),
+        "model.predictor.weights": _FakeTensor(wanted),
+    }
+
+    arr = ICANetworkAtlas._find_projection_tensor(state_dict)
+    np.testing.assert_array_equal(arr, wanted.squeeze(axis=0))
+
+
+def test_find_projection_falls_back_when_no_predictor_key(caplog) -> None:
+    """If no key ends in '.predictor.weights' (e.g. a future TRIBE release
+    renames the subject block), the finder still returns a shape-matching
+    tensor but logs a WARNING so the fallback is visible.
+    """
+    import logging
+    rng = np.random.default_rng(seed=12)
+    only = rng.standard_normal((2048, N_VERTICES)).astype(np.float32)
+
+    state_dict = {"model.unexpected.name": _FakeTensor(only)}
+
+    with caplog.at_level(logging.WARNING, logger="cognitive_similarity.ica_atlas"):
+        arr = ICANetworkAtlas._find_projection_tensor(state_dict)
+
+    np.testing.assert_array_equal(arr, only)
+    assert any(
+        "No key ending in '.predictor.weights'" in r.message for r in caplog.records
+    ), "expected a WARNING when the preferred key name is absent"

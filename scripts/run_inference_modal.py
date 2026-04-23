@@ -71,6 +71,12 @@ IMAGE = IMAGE.add_local_dir(
 VOLUME = modal.Volume.from_name("cogsim-cache", create_if_missing=True)
 CACHE_PATH = "/cache"
 IBC_PATH = "/ibc_public_protocols"
+# Pinned IBC public_protocols commit (master as of 2026-02-24) so upstream path
+# reorgs can't silently invalidate the source_path entries in ibc_exemplars.py.
+# Bump this deliberately when ibc_exemplars.py is updated to reference newer
+# content. Per CLAUDE.md Evidence-Based Development: the paths listed in
+# ibc_exemplars.py were verified against this SHA via raw.githubusercontent.com.
+IBC_PROTOCOLS_SHA = "cbbb7715ea677feb8ed29ed1bc4eaeb1a7f56cc6"
 
 app = modal.App("cogsim-inference", image=IMAGE)
 
@@ -111,13 +117,20 @@ class TribeWorker:
         if token:
             login(token=token)
 
-        # Clone IBC public_protocols — needed for source paths.
+        # Clone IBC public_protocols at the pinned commit. --depth=1 can't
+        # co-exist with checkout <sha>, so we do a full clone + checkout; the
+        # repo is small enough that the extra history cost is negligible
+        # compared to the ~30 s TRIBE-load step that dominates cold-start.
         if not os.path.exists(IBC_PATH):
-            print(f"Cloning IBC public_protocols -> {IBC_PATH}...")
+            print(f"Cloning IBC public_protocols @ {IBC_PROTOCOLS_SHA[:8]} -> {IBC_PATH}...")
             subprocess.run(
-                ["git", "clone", "--depth=1",
+                ["git", "clone",
                  "https://github.com/individual-brain-charting/public_protocols.git",
                  IBC_PATH],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", IBC_PATH, "checkout", IBC_PROTOCOLS_SHA],
                 check=True,
             )
 

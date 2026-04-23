@@ -45,24 +45,19 @@ _N_VERTICES = 20484
 
 
 def _stimulus_from_manifest(entry: dict) -> Stimulus:
-    """Build a Stimulus with the right modality field populated.
+    """Build a minimal Stimulus for local collapsing.
 
-    The modality tag comes from the manifest ("image"/"video" both map to
-    video_path since the Colab/Modal pipeline converts images to static MP4s
-    before inference; "audio" maps to audio_path; "text" to text_path).
-    TemporalCollapser itself only reads stimulus.duration_s, so the choice
-    matters for semantic correctness, not for collapsing.
+    Only stimulus_id is populated; modality path fields stay None on
+    purpose. TemporalCollapser.collapse (collapsing.py) reads only
+    stimulus.duration_s — which is inferred from T when None — so no
+    file path is needed to collapse the cached raw_cortical.npy.
+
+    Previous revisions filled entry["local_path"], which is the Modal
+    container path (e.g. /cache/stimulus_videos/foo.mp4) and does not
+    exist on the local Mac; any code that hashed that path would have
+    died with FileNotFoundError. G3(a) removes that dormant hazard.
     """
-    modality = entry.get("modality", "video")
-    kwargs: dict = {"stimulus_id": entry["stimulus_id"]}
-    path = entry.get("local_path") or entry.get("source_path") or "(unknown)"
-    if modality == "audio":
-        kwargs["audio_path"] = path
-    elif modality == "text":
-        kwargs["text_path"] = path
-    else:
-        kwargs["video_path"] = path
-    return Stimulus(**kwargs)
+    return Stimulus(stimulus_id=entry["stimulus_id"])
 
 
 def _materialize_collapsed(cache_dir: Path, manifest: list[dict]) -> None:
@@ -129,6 +124,19 @@ def _significance_test(
         replacement `n_boot` times, compute the Δ distribution, report
         the 95% CI. CI crossing zero means the effect isn't reliable
         even within the mask we chose.
+
+    Caveat — spatial autocorrelation. (B) resamples vertex indices i.i.d.,
+    which treats each of the ~2048 mask vertices as an independent sample.
+    Cortical vertices are not independent: neighbors on the fsaverage5
+    surface (≈2 mm apart) carry near-identical fMRI signal given the ~6-8 mm
+    spatial smoothness of BOLD, so the effective number of independent
+    samples is much smaller than the vertex count. Consequence: reported
+    CIs are narrower than they should be. TRIBEv2.pdf §5.6 addresses the
+    time-dimension analog ("we only keep one TR every 60 seconds"); the
+    spatial equivalent is a spin test or Moran spectral randomization
+    (see the `neuromaps` library). Current |Δ|s are large enough that this
+    doesn't flip any verdict, but do not read these CIs as formal 95%
+    intervals. Upgrade to spin tests if these numbers need to be published.
     """
     mask = atlas.get_mask(network)
     mask_idx = np.where(mask)[0]
