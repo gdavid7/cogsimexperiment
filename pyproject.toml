@@ -24,6 +24,12 @@ inference = [
     "huggingface-hub>=0.20",
     "transformers>=4.30",
 ]
+neurosynth = [
+    # Required only by scripts/fetch_neurosynth_maps.py (one-time setup for
+    # §5.10 ICA labeling). The runtime library consumes the cached
+    # neurosynth_maps.npz and doesn't import nimare.
+    "nimare>=0.1",
+]
 dev = [
     "pytest>=8.0",
     "hypothesis>=6.100",

@@ -7,9 +7,14 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import sklearn
 from sklearn.decomposition import FastICA
 
 from cognitive_similarity.models import ICANetwork
+from cognitive_similarity.neurosynth_labels import (
+    NEUROSYNTH_TERMS,
+    compute_label_assignment,
+)
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +33,12 @@ PROJECTION_SHAPE = (2048, N_VERTICES)
 # numerical variation across sklearn versions. If this cap is ever hit
 # that's a signal to investigate, not to bump blindly.
 FASTICA_MAX_ITER = 10_000
+
+# NeuroSynth term maps cached alongside the ICA masks in the same cache
+# directory. Populated by scripts/fetch_neurosynth_maps.py; consumed by
+# ICANetworkAtlas at init if present. Layout: .npz keyed by
+# ICANetwork.value, each value a (N_VERTICES,) float32 surface map.
+NEUROSYNTH_MAPS_FILENAME = "neurosynth_maps.npz"
 
 
 class ICANetworkAtlas:
@@ -52,6 +63,7 @@ class ICANetworkAtlas:
         model_id: str = "facebook/tribev2",
         top_percentile: float = 0.10,
         cache_dir: Optional[str] = None,
+        use_neurosynth_labels: bool = True,
         _projection_matrix: Optional[np.ndarray] = None,
     ) -> None:
         """
@@ -70,6 +82,14 @@ class ICANetworkAtlas:
         cache_dir:
             Directory for caching computed masks. Defaults to the current
             working directory.
+        use_neurosynth_labels:
+            If True (default), apply the §5.10 NeuroSynth-based bipartite
+            label assignment when ``neurosynth_maps.npz`` exists in
+            ``cache_dir``. If that file is missing, log a WARNING and
+            fall back to positional labels (not paper-faithful; run
+            scripts/fetch_neurosynth_maps.py to generate the maps).
+            Set False for tests with synthetic projections — positional
+            labels are used unconditionally.
         _projection_matrix:
             Optional pre-computed projection matrix of shape (2048, 20484).
             When provided, skips HuggingFace loading entirely (useful for tests).
@@ -78,6 +98,8 @@ class ICANetworkAtlas:
         self._top_percentile = top_percentile
         self._cache_dir = Path(cache_dir) if cache_dir is not None else Path(".")
         self._cache_path = self._cache_dir / "ica_masks.npz"
+        self._neurosynth_maps_path = self._cache_dir / NEUROSYNTH_MAPS_FILENAME
+        self._use_neurosynth_labels = use_neurosynth_labels
 
         # components[i] is the full ICA component vector of shape (N_VERTICES,)
         self._components: np.ndarray  # shape (N_COMPONENTS, N_VERTICES)
@@ -85,6 +107,21 @@ class ICANetworkAtlas:
         self._masks: np.ndarray       # shape (N_COMPONENTS, N_VERTICES), dtype bool
         # FastICA convergence marker; set by _compute_ica, read from cache on load
         self._fastica_n_iter: Optional[int] = None
+        # sklearn version that produced the cached components (A3 provenance)
+        self._sklearn_version: Optional[str] = None
+        # ICANetwork → component-index assignment (A2). Initialized to positional
+        # identity; overwritten by NeuroSynth assignment when available.
+        self._label_assignment: dict[ICANetwork, int] = {
+            n: i for i, n in enumerate(self.NETWORKS)
+        }
+        # ICANetwork → |Pearson r| with its NeuroSynth reference map; 0.0 when
+        # assignment is positional (no NeuroSynth maps available).
+        self._label_correlations: dict[ICANetwork, float] = {
+            n: 0.0 for n in self.NETWORKS
+        }
+        # Record how labels were determined so callers + caches can audit.
+        # "positional" = NETWORKS list order; "neurosynth" = §5.10 bipartite match.
+        self._label_source: str = "positional"
 
         if _projection_matrix is not None:
             # Bypass HuggingFace — used for testing. Synthetic random-normal
@@ -94,13 +131,21 @@ class ICANetworkAtlas:
             self._components, self._masks = self._compute_ica(
                 _projection_matrix, strict=False
             )
+            # Test path never attempts NeuroSynth labeling — positional only.
         elif self._cache_path.exists():
             log.debug("ICANetworkAtlas: loading masks from cache %s", self._cache_path)
             self._load_cache()
+            # If cache predates NeuroSynth labeling and maps are now available,
+            # compute assignment on the already-loaded components and re-save.
+            if self._use_neurosynth_labels and self._label_source == "positional":
+                self._maybe_apply_neurosynth_labels(resave_on_success=True)
         else:
             log.info("ICANetworkAtlas: no cache found — loading model from HuggingFace")
             projection = self._load_projection_from_hf()
             self._components, self._masks = self._compute_ica(projection)
+            self._sklearn_version = sklearn.__version__
+            if self._use_neurosynth_labels:
+                self._maybe_apply_neurosynth_labels(resave_on_success=False)
             self._save_cache()
 
     # ------------------------------------------------------------------
@@ -133,9 +178,84 @@ class ICANetworkAtlas:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _network_index(network: ICANetwork) -> int:
-        return ICANetworkAtlas.NETWORKS.index(network)
+    def _network_index(self, network: ICANetwork) -> int:
+        """Return the component index assigned to *network*.
+
+        Uses the NeuroSynth-derived assignment when one has been computed
+        (see ``_maybe_apply_neurosynth_labels``); otherwise falls back to
+        the positional ``NETWORKS`` order, which is the legacy behavior.
+        """
+        try:
+            return self._label_assignment[network]
+        except KeyError as exc:
+            raise ValueError(
+                f"Unknown network {network!r}. "
+                f"Valid networks: {[n.value for n in self.NETWORKS]}"
+            ) from exc
+
+    def _maybe_apply_neurosynth_labels(self, *, resave_on_success: bool) -> None:
+        """Attempt to relabel components via the §5.10 NeuroSynth procedure.
+
+        Reads ``<cache_dir>/neurosynth_maps.npz`` (produced by
+        ``scripts/fetch_neurosynth_maps.py``). If the file doesn't exist,
+        logs a WARNING and leaves positional labels in place. If it does
+        exist, computes the bipartite assignment, sign-flips components
+        as needed, updates ``_label_assignment`` and ``_label_correlations``,
+        and optionally re-saves the cache.
+        """
+        if not self._neurosynth_maps_path.exists():
+            log.warning(
+                "NeuroSynth term maps not found at %s — falling back to "
+                "POSITIONAL ICA labels. Run scripts/fetch_neurosynth_maps.py "
+                "to enable paper-faithful §5.10 labeling.",
+                self._neurosynth_maps_path,
+            )
+            return
+
+        log.info(
+            "Applying NeuroSynth §5.10 labels from %s", self._neurosynth_maps_path
+        )
+        data = np.load(self._neurosynth_maps_path)
+        term_maps = {k: data[k] for k in data.files}
+
+        # Compute bipartite assignment; may sign-flip components.
+        adjusted, assignment, correlations = compute_label_assignment(
+            self._components, term_maps
+        )
+
+        # If any components were sign-flipped, rebuild masks from the
+        # adjusted components so top-|x| vertex selection uses the same
+        # oriented component.
+        sign_flipped = [j for j in range(N_COMPONENTS)
+                        if not np.array_equal(adjusted[j], self._components[j])]
+        if sign_flipped:
+            log.info(
+                "Sign-flipped components %s to align with NeuroSynth references",
+                sign_flipped,
+            )
+            self._components = adjusted
+            threshold = 1.0 - self._top_percentile
+            for j in sign_flipped:
+                abs_vals = np.abs(self._components[j])
+                cutoff = np.quantile(abs_vals, threshold)
+                self._masks[j] = abs_vals >= cutoff
+
+        self._label_assignment = assignment
+        self._label_correlations = correlations
+        self._label_source = "neurosynth"
+
+        log.info("NeuroSynth label assignment:")
+        for network in self.NETWORKS:
+            log.info(
+                "  %-24s → comp %d  |r|=%.3f",
+                network.value,
+                assignment[network],
+                correlations[network],
+            )
+
+        if resave_on_success:
+            self._save_cache()
+            log.info("Re-saved ica_masks.npz with NeuroSynth assignment")
 
     def _compute_ica(
         self,
@@ -328,21 +448,89 @@ class ICANetworkAtlas:
         return arr
 
     def _save_cache(self) -> None:
-        """Save computed components and masks to ica_masks.npz."""
+        """Save components, masks, and A3 provenance to ica_masks.npz.
+
+        Schema
+        ------
+        components        : (N_COMPONENTS, N_VERTICES) float32 — sign-adjusted
+        masks             : (N_COMPONENTS, N_VERTICES) bool
+        label_source      : 0-d str — "positional" or "neurosynth"
+        label_assignment_keys   : (N_COMPONENTS,) str — ICANetwork.value
+        label_assignment_values : (N_COMPONENTS,) int — component index
+        label_correlations_keys : (N_COMPONENTS,) str — ICANetwork.value
+        label_correlations_values : (N_COMPONENTS,) float — |r| with NeuroSynth
+        sklearn_version   : 0-d str — sklearn package version
+        fastica_n_iter    : 0-d int — iterations FastICA took to converge
+        """
         self._cache_dir.mkdir(parents=True, exist_ok=True)
+        keys = [n.value for n in self.NETWORKS]
         np.savez(
             self._cache_path,
             components=self._components,
             masks=self._masks,
+            label_source=np.array(self._label_source),
+            label_assignment_keys=np.array(keys),
+            label_assignment_values=np.array(
+                [self._label_assignment[n] for n in self.NETWORKS], dtype=np.int64
+            ),
+            label_correlations_keys=np.array(keys),
+            label_correlations_values=np.array(
+                [self._label_correlations[n] for n in self.NETWORKS], dtype=np.float64
+            ),
+            sklearn_version=np.array(self._sklearn_version or ""),
+            fastica_n_iter=np.array(self._fastica_n_iter or -1, dtype=np.int64),
         )
         log.info("ICANetworkAtlas: masks cached to %s", self._cache_path)
 
     def _load_cache(self) -> None:
-        """Load components and masks from ica_masks.npz."""
+        """Load components, masks, and provenance from ica_masks.npz.
+
+        Accepts both the pre-A3 (components+masks only) schema and the
+        post-A3 extended schema. Missing fields fall back to defaults
+        (positional labels, empty version/n_iter) and log a WARNING so
+        a stale cache is visible.
+        """
         data = np.load(self._cache_path)
         self._components = data["components"]
         self._masks = data["masks"].astype(bool)
-        log.debug("ICANetworkAtlas: loaded %d components from cache", len(self._components))
+
+        if "label_source" in data.files:
+            self._label_source = str(data["label_source"])
+            keys = [str(k) for k in data["label_assignment_keys"].tolist()]
+            vals = data["label_assignment_values"].tolist()
+            corr_vals = data["label_correlations_values"].tolist()
+            self._label_assignment = {
+                ICANetwork(k): int(v) for k, v in zip(keys, vals)
+            }
+            self._label_correlations = {
+                ICANetwork(k): float(v) for k, v in zip(keys, corr_vals)
+            }
+            self._sklearn_version = str(data["sklearn_version"]) or None
+            n_iter = int(data["fastica_n_iter"])
+            self._fastica_n_iter = n_iter if n_iter >= 0 else None
+        else:
+            log.warning(
+                "Legacy ica_masks.npz (pre-A3 schema) at %s — no provenance. "
+                "Using positional labels; regenerate for paper-faithful labeling.",
+                self._cache_path,
+            )
+            # Defaults already set in __init__
+
+        # Sklearn drift warning (A3): if the cache was produced by a
+        # different sklearn, FastICA internals may differ even with the
+        # same random_state. Not fatal, but the user should know.
+        if self._sklearn_version and self._sklearn_version != sklearn.__version__:
+            log.warning(
+                "ica_masks.npz was produced by sklearn %s; current is %s. "
+                "Components may differ if regenerated. Delete the cache to "
+                "force a rebuild.",
+                self._sklearn_version, sklearn.__version__,
+            )
+
+        log.debug(
+            "ICANetworkAtlas: loaded %d components from cache (label_source=%s)",
+            len(self._components), self._label_source,
+        )
 
     # ------------------------------------------------------------------
     # Factory classmethod for testing / pre-computed matrices
@@ -368,4 +556,5 @@ class ICANetworkAtlas:
         return cls(
             _projection_matrix=projection_matrix,
             top_percentile=top_percentile,
+            use_neurosynth_labels=False,
         )
