@@ -19,6 +19,15 @@ N_VERTICES = 20484
 N_COMPONENTS = 5
 # Shape of the unseen-subject projection layer in best.ckpt
 PROJECTION_SHAPE = (2048, N_VERTICES)
+# FastICA iteration cap. Empirically the real best.ckpt projection needs
+# ~3998 iterations to converge (sklearn 1.8, tol=1e-4, random_state=42);
+# the prior max_iter=1000 was silently capping the optimizer mid-descent,
+# producing seed-dependent non-converged components. Per TRIBEv2.pdf §5.10
+# the paper uses "default parameters" but doesn't report convergence; we
+# choose a value well above observed convergence with headroom for
+# numerical variation across sklearn versions. If this cap is ever hit
+# that's a signal to investigate, not to bump blindly.
+FASTICA_MAX_ITER = 10_000
 
 
 class ICANetworkAtlas:
@@ -74,11 +83,17 @@ class ICANetworkAtlas:
         self._components: np.ndarray  # shape (N_COMPONENTS, N_VERTICES)
         # masks[i] is a boolean array of shape (N_VERTICES,)
         self._masks: np.ndarray       # shape (N_COMPONENTS, N_VERTICES), dtype bool
+        # FastICA convergence marker; set by _compute_ica, read from cache on load
+        self._fastica_n_iter: Optional[int] = None
 
         if _projection_matrix is not None:
-            # Bypass HuggingFace — used for testing
+            # Bypass HuggingFace — used for testing. Synthetic random-normal
+            # matrices have no true independent components so FastICA won't
+            # converge; don't let that fail the test path.
             log.debug("ICANetworkAtlas: using provided projection matrix (test mode)")
-            self._components, self._masks = self._compute_ica(_projection_matrix)
+            self._components, self._masks = self._compute_ica(
+                _projection_matrix, strict=False
+            )
         elif self._cache_path.exists():
             log.debug("ICANetworkAtlas: loading masks from cache %s", self._cache_path)
             self._load_cache()
@@ -123,7 +138,9 @@ class ICANetworkAtlas:
         return ICANetworkAtlas.NETWORKS.index(network)
 
     def _compute_ica(
-        self, projection: np.ndarray
+        self,
+        projection: np.ndarray,
+        strict: bool = True,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Run FastICA on the projection matrix and threshold components.
 
@@ -131,6 +148,13 @@ class ICANetworkAtlas:
         ----------
         projection:
             Matrix of shape (2048, 20484).
+        strict:
+            If True (production path — real TRIBE checkpoint), raise
+            RuntimeError when FastICA hits the iteration cap without
+            converging. If False (test path — synthetic random-normal
+            projections), log a WARNING but continue: random Gaussian
+            matrices have no true independent components, so FastICA
+            legitimately won't converge on them.
 
         Returns
         -------
@@ -141,11 +165,41 @@ class ICANetworkAtlas:
             vertices per component.
         """
         log.debug("ICANetworkAtlas: running FastICA(n_components=%d)", N_COMPONENTS)
-        ica = FastICA(n_components=N_COMPONENTS, random_state=42, max_iter=1000)
+        ica = FastICA(
+            n_components=N_COMPONENTS,
+            random_state=42,
+            max_iter=FASTICA_MAX_ITER,
+        )
         # FastICA expects shape (n_samples, n_features); projection is (2048, 20484)
         # Treat each of the 2048 rows as a sample, 20484 features.
         # The mixing matrix columns are the components over vertices.
         ica.fit(projection)
+
+        # A non-converged fit produces seed-dependent components that silently
+        # break the paper's §5.10 interpretation (the unmixing matrix W hasn't
+        # stabilized at the algorithm's optimum). Fail loudly on the real
+        # checkpoint; only soft-warn on synthetic test matrices.
+        if ica.n_iter_ >= FASTICA_MAX_ITER:
+            if strict:
+                raise RuntimeError(
+                    f"FastICA did not converge after {FASTICA_MAX_ITER} iterations "
+                    f"(n_iter_={ica.n_iter_}). Components are unstable and component "
+                    "ordering becomes seed-dependent. Investigate numerical "
+                    "conditioning of the projection matrix before bumping the cap."
+                )
+            log.warning(
+                "FastICA did not converge on the provided projection "
+                "(n_iter_=%d); proceeding because strict=False. Expected "
+                "for synthetic random-normal test matrices.",
+                ica.n_iter_,
+            )
+        self._fastica_n_iter = int(ica.n_iter_)
+        log.info(
+            "ICANetworkAtlas: FastICA fit finished in %d iterations (cap %d)",
+            ica.n_iter_,
+            FASTICA_MAX_ITER,
+        )
+
         # components_ has shape (n_components, n_features) = (5, 20484)
         components = ica.components_.astype(np.float32)  # (5, 20484)
 
