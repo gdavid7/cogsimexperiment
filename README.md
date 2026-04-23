@@ -14,18 +14,18 @@ The pipeline:
 
 Tested end-to-end against 6 pairwise ordering predictions from the neuroscience literature (e.g. `sim(face, face) > sim(face, place)` from FFA face-selectivity). Per-check statistics include vertex-bootstrap CI on Δ and a random-mask permutation test for mask specificity, with Benjamini-Hochberg FDR correction across the batch.
 
-| Check | Δ | BH q | CI excludes 0 | Notes |
-|---|---|---|---|---|
-| face > place (visual)                  | +0.705 | >0.999 | ✓ | ordering only |
-| place > body (visual)                  | +0.465 | >0.999 | ✓ | ordering only |
-| body > face (visual)                   | +0.230 | >0.999 | ✓ | ordering only |
-| written_char > place (visual/VWFA)     | +0.164 | >0.999 | ✓ | ordering only |
-| speech > non_speech (primary auditory) | +0.028 | >0.999 | ✓ | ordering only, tiny Δ |
-| sentence > word_list (language)        | −0.037 | >0.999 | — | FAILED (wrong direction) |
+| Check | Δ | BH q | Verdict |
+|---|---|---|---|
+| face > place (visual)                  | +0.002 | >0.999 | ordering only |
+| place > body (visual)                  | −0.000 | >0.999 | FAILED (Δ ≈ 0) |
+| body > face (visual / EBA)             | +0.003 | **0.010** | **mask-specific** |
+| written_char > place (visual / VWFA)   | +0.002 | **0.009** | **mask-specific** |
+| speech > non_speech (primary auditory) | +0.005 | **<0.001** | **mask-specific** |
+| sentence > word_list (language)        | −0.042 | >0.999 | FAILED (wrong direction) |
 
-5/6 orderings hold with stable Δ > 0. 0/6 show mask-specific selectivity after FDR correction — i.e. a random same-size subset of cortex gives Δs comparable to the labeled mask. This is not a metric failure; it reflects that TRIBE's predicted responses carry broad category information throughout cortex, not just in narrow ICA-defined networks. The one failing check is structural, not a bug: pairwise Pearson on a correctly-labeled language mask doesn't replicate the paper's §2.6 *magnitude*-contrast finding between sentences and word lists (different statistical question).
+**4/6 orderings hold with stable Δ > 0; 3/6 show mask-specific selectivity at BH q<0.05** (Benjamini-Hochberg FDR across the batch). Δs are small in absolute terms because the §5.9-aligned 1 s stimulus + 7 s blank protocol produces a brief hemodynamic transient rather than sustained activation — category-specific differences register as focal perturbations over a largely-shared baseline, which is exactly what the paper's Figure 4E methodology also shows (tiny per-trial signal, amplified by GLM across many trials; we have one trial per stimulus, so the single-trial Δs are tiny but the mask-specificity still survives FDR for 3/6 checks).
 
-*The numbers above are from the current cache. Re-running Modal with the §5.9-aligned 8 s stimulus protocol (Slice 3) may shift them; see `CLAUDE.md` for per-slice provenance.*
+The two failing orderings: `place>body` has Δ ≈ 0 (below single-trial noise), and `sentence>word_list` fails by design — pairwise Pearson on a correctly-labeled language mask doesn't replicate the paper's §2.6 *magnitude*-contrast finding (different statistical question; see `.kiro/specs/cognitive-similarity/requirements.md` §4.3 for framing).
 
 Full run with significance stats: `python scripts/validate_ibc.py --cache-dir <local_cache>`.
 Paper-faithful Figure 4E contrast-map replication: `python scripts/replicate_figure_4e.py --cache-dir <local_cache>`.

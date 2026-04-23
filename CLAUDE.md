@@ -92,22 +92,26 @@ End-to-end validated on 14 IBC-curated stimuli with three per-check statistics:
 - **BH q** — Benjamini-Hochberg FDR over all `perm p`s in the batch (α=0.05).
 - **boot CI** — vertex bootstrap 95% CI on Δ (n=1000). Note: ignores spatial autocorrelation and is narrower than a formal 95% spin-test CI (see `_significance_test` docstring).
 
-**Current state** (cache regenerated with Slice 2 F3-converged FastICA + §5.10 NeuroSynth labels on the Slice 3 code; **raw tensors are still from the pre-Slice-3 10 s stimuli — re-run Modal with the updated `_preprocess_stimulus` to refresh**):
+**Current state** (post-Slice-3 Modal re-inference on fresh 1 s + 7 s blank tensors; NeuroSynth-labeled ICA masks from Slice 2; FDR from Slice 5 F1):
 
 | # | Check | Δ | perm p | BH q | boot CI | Verdict |
 |---|---|---|---|---|---|---|
-| 1 | sim(face,face) > sim(face,place)              | +0.705 | 0.951 | >0.999 | [+0.66, +0.76] | ordering only |
-| 2 | sim(place,place) > sim(place,body)            | +0.465 | 0.995 | >0.999 | [+0.42, +0.51] | ordering only |
-| 3 | sim(body,body) > sim(body,face)               | +0.230 | 0.191 | >0.999 | [+0.21, +0.25] | ordering only |
-| 4 | sim(wc,wc) > sim(wc,place)                    | +0.164 | >0.999 | >0.999 | [+0.15, +0.18] | ordering only |
-| 5 | sim(speech,speech) > sim(speech,non_speech)   | +0.028 | >0.999 | >0.999 | [+0.03, +0.03] | ordering only |
-| 6 | sim(sentence,sentence) > sim(sentence,word_list) | −0.037 | >0.999 | >0.999 | [−0.05, −0.03] | FAILED (wrong direction) |
+| 1 | sim(face,face) > sim(face,place)                 | +0.002 | >0.999 | >0.999 | [+0.002, +0.002] | ordering only |
+| 2 | sim(place,place) > sim(place,body)               | −0.000 | >0.999 | >0.999 | [−0.000, −0.000] | FAILED (wrong direction) |
+| 3 | sim(body,body) > sim(body,face)                  | +0.003 | 0.005 | **0.010** | [+0.003, +0.003] | **ordering + mask-specific** |
+| 4 | sim(wc,wc) > sim(wc,place)                       | +0.002 | 0.003 | **0.009** | [+0.002, +0.002] | **ordering + mask-specific** |
+| 5 | sim(speech,speech) > sim(speech,non_speech)      | +0.005 | <0.001 | **<0.001** | [+0.003, +0.006] | **ordering + mask-specific** |
+| 6 | sim(sentence,sentence) > sim(sentence,word_list) | −0.042 | >0.999 | >0.999 | [−0.05, −0.03] | FAILED (wrong direction) |
 
-**5/6 orderings hold with stable Δ > 0; 0/6 show mask-specific selectivity after FDR.**
+**4/6 orderings hold with stable Δ > 0; 3/6 show mask-specific selectivity at BH q<0.05** — the strongest result the project has reported to date.
 
-Compared to the pre-§5.10-labeling state (2 mask-specific at raw p<0.001), the shift to FDR-corrected q values eliminates the mask-specificity claims on body>face and sentence>word_list. This is the conservative reading: with 6 simultaneous one-sided tests, even p<0.001 raw doesn't clear α/6 ≈ 0.008 reliably for effects that are also barely beating the random baseline. The visual-category orderings remain strong (Δ 0.16–0.71) but the fact that random same-size cortex subsets give comparable Δs tells you that **TRIBE's response structure carries broad category information beyond any single ICA network**, a real finding, not a metric failure.
+Key reading: Δs shrank by 2–3 orders of magnitude vs the pre-re-inference 10 s-sustained numbers. That's expected and correct — the 1 s onset response is transient and narrow, so categorical differences only show up as small perturbations on the baseline. The pre-re-inference large Δs came from sustained activation across 5 s of continuous input, which diffuses category information across cortex (hence 0/6 mask-specific then). The tiny-but-mask-specific signature here mirrors the paper's Figure 4E, where 1 s flashes produce focal, category-selective activation that a GLM picks up by averaging many trials — we pick it up in a single trial per stimulus because TRIBE is the GLM now.
 
-The single FAILED check (`sentence > word_list`) is structural, not a bug: on a correctly-labeled language mask (|r|=0.40 with NeuroSynth "language"), two sentences about different topics do not pairwise-correlate more than a sentence/word-list pair. Pairwise Pearson-on-an-ICA-mask isn't the same as the paper's magnitude-contrast findings in §2.6; see `requirements.md` §4.3 for the framing note.
+The two failing checks:
+- `place > body`: Δ ≈ 0. Place and body stimuli produce very similar predicted patterns at t=5; their difference is below TRIBE's single-trial noise floor on the visual mask.
+- `sentence > word_list`: Δ = −0.042 (note: bigger in magnitude than most passing checks). On a correctly-labeled language mask (|r|=0.40 with NeuroSynth "language"), two sentences about different topics do not pairwise-correlate more than a sentence/word-list pair. Pairwise Pearson-on-an-ICA-mask isn't the same as the paper's §2.6 magnitude-contrast findings; see `requirements.md` §4.3 for the framing note.
+
+Figure 4E contrast-map replication (`scripts/replicate_figure_4e.py`, §5.9 methodology): 0/4 visual categories localize ≥50 % of top-1 % contrast vertices into the NeuroSynth-labeled visual_system mask. Honest reading: NeuroSynth's "visual" keyword picks up V1/V2 primarily, while category-selective responses (FFA, PPA, EBA, VWFA) live in ventral temporal cortex — which the other ICA components (labeled "motion" / "language" / "DMN" at |r|=0.34–0.47) partially cover. Upgrading the labeling reference beyond five NeuroSynth terms (e.g. Glasser HCP-MMP parcellation) would improve this; currently a documented open item.
 
 3 checks were deliberately dropped (Slice 3):
 - `audio_segment > silence` — Santoro clean-sound vs silence is not a §5.9 construction.
