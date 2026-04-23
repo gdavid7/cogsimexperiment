@@ -111,17 +111,23 @@ _LANGUAGE: list[Exemplar] = [
 ]
 
 
-# MT+ check — biological motion vs scrambled control. baseballswing and
-# dancing2 are two distinct human actions (different action identity);
-# static_image_01 is the NonBioMvt scramble of baseballswing so the only
-# difference from motion_video_01 is biological-motion coherence.
+# MT+ check — biological motion vs a true static image. baseballswing and
+# dancing2 are two distinct human actions; static_image_01 is the FaceBody
+# `scrambled` category (a fixed visual-feature-dense image, no motion) rendered
+# as a 10 s static MP4 via the same facebody_jpg pipeline as face/place/body.
+#
+# Earlier we used NonBioMvt/baseballswing_s10.mp4 as the "static" control, but
+# NonBioMvt is not actually static — it's scramble-of-biological-motion, which
+# still contains motion and therefore still activates MT+. That made the
+# motion>static check fail (0.97 < 0.99) because both sides had motion.
+# A genuinely still image is the right control.
 _MT_PLUS: list[Exemplar] = [
     Exemplar("motion_video_01", "video", "biomvt_mp4", "motion_video",
              source_path="archi/protocols/archi_emotional/BioMvt/BioGifMovies/baseballswing_s10.mp4"),
     Exemplar("motion_video_02", "video", "biomvt_mp4", "motion_video",
              source_path="archi/protocols/archi_emotional/BioMvt/BioGifMovies/dancing2_s10.mp4"),
-    Exemplar("static_image_01", "video", "biomvt_mp4", "static_image",
-             source_path="archi/protocols/archi_emotional/NonBioMvt/BioGifMovies/baseballswing_s10.mp4"),
+    Exemplar("static_image_01", "video", "facebody_jpg", "static_image",
+             source_path="FaceBody/stimuli/scrambled/scrambled-1.jpg"),
 ]
 
 

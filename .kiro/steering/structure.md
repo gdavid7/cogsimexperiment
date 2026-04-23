@@ -11,11 +11,13 @@ cognitive_similarity/          # Main package
 ├── ica_atlas.py             # ICANetworkAtlas - brain network masks/components
 ├── collapsing.py            # TemporalCollapser - temporal response reduction
 ├── cache.py                 # ResponseCache - disk-based caching
-├── stimulus_runner.py       # StimulusRunner - TRIBE v2 inference (Colab)
+├── stimulus_runner.py       # StimulusRunner - TRIBE v2 inference (runs inside Modal worker)
 └── validation.py            # ValidationSuite - correctness validation
 
 scripts/                      # Operational scripts (not part of the package)
-└── validate_ibc.py          # Run ValidationSuite against a synced IBC cache
+├── ibc_exemplars.py         # 23-stimulus manifest spec + English translations
+├── run_inference_modal.py   # Modal App + GPU worker; remote TRIBE v2 inference
+└── validate_ibc.py          # Run ValidationSuite against a local cache
 
 tests/                        # Test suite
 ├── test_facade.py           # Integration & property tests for facade
@@ -25,7 +27,6 @@ tests/                        # Test suite
 ├── test_collapsing.py       # Tests for temporal collapsing
 └── test_cache.py            # Tests for caching system
 
-remote_inference.ipynb        # Colab-side inference pipeline
 demo.ipynb                    # Local exploration with synthetic data
 TRIBEv2.pdf                   # Primary research source (read-only)
 
@@ -74,10 +75,10 @@ TRIBEv2.pdf                   # Primary research source (read-only)
   - Enums for ICANetwork, ICAMode
   - Validation methods where needed
 
-### Inference Layer (Colab-only)
+### Inference Layer (Modal-hosted GPU)
 - **stimulus_runner.py**: TRIBE v2 model inference
   - Not used in local testing (requires GPU)
-  - Pre-computed responses stored in cache for local development
+  - Executed inside the Modal worker (`scripts/run_inference_modal.py`); results land on the `cogsim-cache` Modal Volume and are mirrored to a local cache dir for downstream analysis
 
 ## Architecture Patterns
 

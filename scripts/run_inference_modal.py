@@ -40,7 +40,8 @@ from scripts.ibc_exemplars import EXEMPLARS, SMOKE_TEST_IDS, Exemplar, by_id  # 
 #
 # tribev2 pins its own deps (notably numpy==2.2.6 and a torch range). We install
 # it first so pip resolves around those pins, then layer our other deps on top.
-# This matches the working recipe from remote_inference.ipynb Cell 1.
+# This matches the working recipe that validated against Colab in earlier
+# runs (see git history for the old remote_inference.ipynb equivalent).
 IMAGE = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("ffmpeg", "git")
@@ -224,29 +225,34 @@ def _preprocess_stimulus(ex: Exemplar, cache_root: str, ibc_root: str) -> Path:
     tribev2.eventstransforms.CreateVideosFromImages defaults so the encoded
     bytes closely match what TRIBE v2's own helper would produce.
     """
-    import shutil
-    import subprocess
-
     cache = Path(cache_root)
     if ex.src_kind == "facebody_jpg":
         out = cache / "stimulus_videos" / f"{ex.stimulus_id}.mp4"
         if not out.exists():
             src = Path(ibc_root) / ex.source_path
-            _image_to_static_video(src, out, duration_s=10.0, fps=10)
+            _run_ffmpeg(
+                ["ffmpeg", "-loop", "1", "-i", str(src),
+                 "-t", "10", "-r", "10",
+                 "-c:v", "libx264", "-pix_fmt", "yuv420p", "-an",
+                 "-y", "-loglevel", "error", str(out)],
+                out,
+            )
         return out
 
     if ex.src_kind == "biomvt_mp4":
         out = cache / "stimulus_videos" / f"{ex.stimulus_id}.mp4"
         if not out.exists():
             src = Path(ibc_root) / ex.source_path
-            # Loop the input (5.9 s) to fill 10 s exactly. libx264 re-encode so
-            # the final duration is deterministic regardless of input fps.
-            subprocess.run(
+            # Loop the input (5.9 s) to fill 10 s exactly. libx264 + yuv420p
+            # need even width/height (chroma subsampling), but the BioMvt
+            # clips are 83×171 — pad to the next even size with black.
+            _run_ffmpeg(
                 ["ffmpeg", "-stream_loop", "-1", "-i", str(src),
                  "-t", "10", "-r", "10",
+                 "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
                  "-c:v", "libx264", "-pix_fmt", "yuv420p", "-an",
                  "-y", "-loglevel", "error", str(out)],
-                check=True,
+                out,
             )
         return out
 
@@ -254,26 +260,31 @@ def _preprocess_stimulus(ex: Exemplar, cache_root: str, ibc_root: str) -> Path:
         out = cache / "stimulus_audios" / f"{ex.stimulus_id}.wav"
         if not out.exists():
             src = Path(ibc_root) / ex.source_path
-            # apad=whole_dur=10 pads the end with silence to reach exactly 10 s.
-            # -ar 16000 ensures the W2vec-Bert-expected sample rate.
-            subprocess.run(
-                ["ffmpeg", "-i", str(src),
-                 "-af", "apad=whole_dur=10",
+            # Loop the 1 s IBC realistic_sounds WAV to fill 10 s. Earlier we
+            # used apad=whole_dur=10 (silence-pad); that gave TRIBE 9 s of
+            # silence dominating the response, which made audio stimuli
+            # correlate MORE with pure silence than with each other
+            # (validation check audio_segment > silence failed with 0.75 < 0.91).
+            # Looping gives continuous auditory content, matching the trick
+            # we already use for BioMvt 5.9 s clips.
+            _run_ffmpeg(
+                ["ffmpeg", "-stream_loop", "-1", "-i", str(src),
+                 "-t", "10",
                  "-ar", "16000", "-ac", "1",
                  "-y", "-loglevel", "error", str(out)],
-                check=True,
+                out,
             )
         return out
 
     if ex.src_kind == "synth_silence":
         out = cache / "stimulus_audios" / f"{ex.stimulus_id}.wav"
         if not out.exists():
-            subprocess.run(
+            _run_ffmpeg(
                 ["ffmpeg", "-f", "lavfi",
                  "-i", "anullsrc=r=16000:cl=mono",
                  "-t", "10",
                  "-y", "-loglevel", "error", str(out)],
-                check=True,
+                out,
             )
         return out
 
@@ -287,16 +298,21 @@ def _preprocess_stimulus(ex: Exemplar, cache_root: str, ibc_root: str) -> Path:
     raise ValueError(f"Unknown src_kind: {ex.src_kind!r}")
 
 
-def _image_to_static_video(src: Path, out: Path, duration_s: float, fps: int) -> None:
-    """ffmpeg invocation matching tribev2's CreateVideosFromImages defaults."""
+def _run_ffmpeg(cmd: list[str], out: Path) -> None:
+    """Run an ffmpeg command; on failure delete the (possibly partial) output.
+
+    Without this cleanup, a crashed ffmpeg run leaves a corrupt file that the
+    `if not out.exists()` short-circuit will happily reuse on the next call —
+    causing downstream readers (e.g. moviepy inside TRIBE) to hit "moov atom
+    not found" on what looks like a cached stimulus.
+    """
     import subprocess
-    subprocess.run(
-        ["ffmpeg", "-loop", "1", "-i", str(src),
-         "-t", str(duration_s), "-r", str(fps),
-         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-an",
-         "-y", "-loglevel", "error", str(out)],
-        check=True,
-    )
+    try:
+        subprocess.run(cmd, check=True)
+    except Exception:
+        if out.exists():
+            out.unlink()
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -365,8 +381,15 @@ def main(
 def _download_volume(local_dir: str) -> None:
     """Pull manifest.json + tensors/ from the Volume to a local directory.
 
-    Uses the `modal volume get` CLI for simplicity — same effect as
-    programmatic Volume iteration but reuses Modal's own robust transfer path.
+    Invokes `modal volume get` as `python -m modal ...` so we don't depend on
+    the `modal` CLI being on PATH (it lives inside whichever venv the user
+    installed Modal into, and that venv is by definition the one running
+    this local_entrypoint).
+
+    Subtle: `modal volume get <volume> <source> <dest>` writes to
+    `<dest>/<source>` — it creates the `source` file/dir INSIDE the given
+    destination. So we pass the parent directory, not the full target path.
+    Writing to an existing full path makes the CLI error out.
     """
     import shutil
     import subprocess
@@ -381,7 +404,8 @@ def _download_volume(local_dir: str) -> None:
             else:
                 target.unlink()
         subprocess.run(
-            ["modal", "volume", "get", "cogsim-cache", sub, str(target)],
+            [sys.executable, "-m", "modal", "volume", "get",
+             "cogsim-cache", sub, str(dest)],
             check=True,
         )
     print(f"✓ Synced Volume to {dest}")

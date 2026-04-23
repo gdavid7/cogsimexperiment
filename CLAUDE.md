@@ -47,12 +47,13 @@ cognitive_similarity/       # Main package
 ├── ica_atlas.py           # ICANetworkAtlas — network masks / components
 ├── collapsing.py          # TemporalCollapser (auto-selects method from duration)
 ├── cache.py               # ResponseCache — disk-based
-├── stimulus_runner.py     # TRIBE v2 inference (Colab-only, GPU)
+├── stimulus_runner.py     # TRIBE v2 inference (used inside the Modal worker)
 └── validation.py          # ValidationSuite
-scripts/                   # Operational scripts
-└── validate_ibc.py        # Run ValidationSuite against a synced IBC cache
+scripts/                   # Operational scripts (driven from the local Mac terminal)
+├── ibc_exemplars.py       # Single source of truth — the 23 stimulus spec
+├── run_inference_modal.py # Modal App + GPU worker; runs TRIBE v2 in the cloud
+└── validate_ibc.py        # Local-side: materialize collapsed.npy + run ValidationSuite
 tests/                     # One test file per module; property tests via Hypothesis
-remote_inference.ipynb     # Colab-side inference pipeline (model load → manifest → inference → cache)
 demo.ipynb                 # Local exploration notebook using synthetic data
 .kiro/specs/cognitive-similarity/   # Authoritative specs (see below)
 TRIBEv2.pdf                # Primary research source
@@ -64,26 +65,38 @@ Architectural patterns: facade (CognitiveSimilarity), strategy (collapsing), cac
 
 ## End-to-end Workflow
 
-Inference is split across two environments:
+Inference is split across two environments, both driven from the local Mac terminal (no browser, no Colab session):
 
-1. **Colab (`remote_inference.ipynb`)** — loads TRIBE v2 on GPU, preconverts stimulus JPGs to 10 s static MP4s with ffmpeg (matching `tribev2.eventstransforms.CreateVideosFromImages` defaults: `fps=10`, `libx264`, no audio), runs inference, writes `raw_cortical.npy` per stimulus under `tensors/<content_hash>/` on Google Drive.
-2. **Local Mac** — sync the Drive cache to the Mac, then run `python scripts/validate_ibc.py --cache-dir <cache>` to materialize `collapsed.npy` (peak extraction at t+5 s) and run `ValidationSuite` against the real HuggingFace-loaded ICA atlas.
+1. **Modal (GPU inference)** — `modal run scripts/run_inference_modal.py [--smoke-only] [--ids ...] [--download-to <path>]` spins up an A100 container with TRIBE v2, clones IBC `public_protocols` inside the container, preprocesses each stimulus (image→10 s static MP4, WAV→10 s padded with silence, French→English text→gTTS+WhisperX inside TRIBE, BioMvt clip→10 s looped MP4), runs cortical inference, and writes `raw_cortical.npy` to a persistent Modal Volume (`cogsim-cache`). `--download-to` optionally mirrors the Volume to a local cache dir on completion.
+2. **Local Mac (CPU analysis)** — `python scripts/validate_ibc.py --cache-dir <cache>` materializes `collapsed.npy` (peak extraction at t+5 s) and runs `ValidationSuite` against the real HuggingFace-loaded ICA atlas.
 
-Stimulus duration is **10 s per static video** (deviation from TRIBEv2.pdf §5.9's 1 s cited for the paper's streamed-GLM protocol). Rationale: single-stimulus inference needs enough timepoints for TRIBE's output to reach the t+5 s hemodynamic peak (§5.8); a 1-s input gives T=1 and the collapser falls back to the earliest timepoint with badly compressed Δs (0.01–0.05), whereas 10 s gives T≈10 and lets the collapser take `cortical_response[5]` with meaningful Δs (0.09–0.45).
+**Prerequisites (one-time):** `pip install modal` + `modal token new` (browser auth) + `modal secret create hf-token HF_TOKEN=<your_token>` for the gated Llama 3.2 inside TRIBE's text pipeline. The first `modal run` builds the container image (~5 min, mostly the tribev2 pip install); subsequent runs start in seconds.
 
-## Validation Status (as of commit d3faa17)
+**Resuming after a dropped session:** if your laptop goes offline mid-run, the Modal Volume keeps whatever stimuli committed, and re-running the same command skips any cached `raw_cortical.npy`. For long runs or unstable connections, use `modal run --detach ...` so the GPU job continues even when the local client disconnects.
 
-End-to-end validated on 8 IBC FaceBody exemplars:
+Stimulus duration is **10 s per static video/audio** (deviation from TRIBEv2.pdf §5.9's 1 s cited for the paper's streamed-GLM protocol). Rationale: single-stimulus inference needs enough timepoints for TRIBE's output to reach the t+5 s hemodynamic peak (§5.8); a 1-s input gives T=1 and the collapser falls back to the earliest timepoint with badly compressed Δs (0.01–0.05), whereas 10 s gives T≈10 and lets the collapser take `cortical_response[5]` with meaningful Δs (0.09–0.45).
 
-| Check | Networks | Status |
-|---|---|---|
-| sim(face,face) > sim(face,place) | Visual System (FFA) | ✓ PASS (Δ 0.45) |
-| sim(place,place) > sim(place,body) | Visual System (PPA) | ✓ PASS (Δ 0.33) |
-| sim(body,body) > sim(body,face) | Visual System (EBA) | ✓ PASS (Δ 0.31) |
-| sim(wc,wc) > sim(wc,place) | Visual System (VWFA) | ✓ PASS (Δ 0.09) |
-| Auditory / Language / MT+ checks (5) | — | SKIPPED — stimuli not yet curated |
+## Validation Status
 
-4 / 9 checks pass; the 5 skipped checks await auditory/language/MT+ stimulus curation (see requirements.md §5 for the remaining orderings).
+End-to-end validated on 23 IBC-curated stimuli (all 9 neuroscientific orderings evaluated) with two significance tests per check:
+- **perm p** — random-mask permutation (n=1000); tests whether the ICA mask beats a random same-size cortex subset.
+- **boot CI** — vertex bootstrap 95% CI on Δ (n=1000); tests whether Δ is a stable positive estimate.
+
+| # | Check | Δ | perm p | boot CI | Verdict |
+|---|---|---|---|---|---|
+| 1 | sim(face,face) > sim(face,place) | +0.436 | >0.999 | [+0.40, +0.47] | ordering only |
+| 2 | sim(place,place) > sim(place,body) | +0.340 | >0.999 | [+0.31, +0.38] | ordering only |
+| 3 | sim(body,body) > sim(body,face) | +0.308 | <0.001 | [+0.29, +0.33] | **ordering + mask-specific** |
+| 4 | sim(wc,wc) > sim(wc,place) | +0.091 | >0.999 | [+0.08, +0.10] | ordering only |
+| 5 | sim(speech,speech) > sim(speech,non_speech) | +0.028 | >0.999 | [+0.03, +0.03] | ordering only (tiny Δ) |
+| 6 | sim(audio_segment,audio_segment) > sim(audio_segment,silence) | −0.168 | 0.749 | [−0.19, −0.15] | FAILED (wrong direction) |
+| 7 | sim(sentence,sentence) > sim(sentence,word_list) | +0.171 | <0.001 | [+0.15, +0.19] | **ordering + mask-specific** |
+| 8 | sim(complex,complex) > sim(complex,simple) | −0.069 | <0.001 | [−0.08, −0.06] | FAILED (wrong direction) |
+| 9 | sim(motion,motion) > sim(motion,static) | +0.304 | >0.999 | [+0.27, +0.34] | ordering only |
+
+**7/9 orderings hold with stable Δ > 0. Only 2/7 also pass the mask-specificity test**: body>face and sentence>word_list. For the other 5 "ordering-only" checks, the effect is driven by global TRIBE response structure — a random same-size cortex subset gives a comparable or bigger Δ. The two failures (audio>silence, complex>simple) flip direction; both involve subtle contrasts whose known issues are documented in `README.md#known-limitations`.
+
+To re-run: `python scripts/validate_ibc.py --cache-dir <local_cache>`.
 
 ## Code Conventions
 

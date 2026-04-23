@@ -28,52 +28,52 @@ The system is designed to be used as a Python library. The primary entry point i
 
 ```mermaid
 graph TD
-    subgraph COLAB["Google Colab Pro (A100 GPU)"]
-        A[IBC Stimuli<br/>images + audio + text] --> B[remote_inference.ipynb]
-        B --> C[TRIBE v2<br/>TribeModel.predict]
+    subgraph MODAL["Modal A100 worker (scripts/run_inference_modal.py)"]
+        A[IBC public_protocols<br/>git clone inside container] --> PP[preprocess:<br/>image→MP4 / WAV+pad / MP4 loop / text]
+        PP --> C[TRIBE v2<br/>TribeModel.predict]
         C --> D1[raw_cortical.npy<br/>T × 20484]
-        D1 --> GD[(Google Drive Cache)]
-        A --> GD
+        D1 --> MV[(Modal Volume<br/>cogsim-cache)]
     end
 
-    subgraph LOCAL["Local Mac (no GPU required)"]
-        GD --> RC[ResponseCache]
+    subgraph LOCAL["Local Mac (scripts/validate_ibc.py)"]
+        MV --> DL[modal volume get]
+        DL --> RC[ResponseCache]
         RC --> TC[TemporalCollapser]
         TC --> CR[collapsed.npy<br/>20484]
         CR --> RC
         RC --> SE[SimilarityEngine]
         ICA[ICANetworkAtlas<br/>5 network masks] --> SE
         SE --> P[Cognitive_Similarity_Profile<br/>5 network scores + whole-cortex]
-        P --> R[RankedSimilarity]
         P --> V[ValidationSuite]
-        P --> DN[DemoNotebook]
+        P --> DN[demo.ipynb]
     end
 ```
 
 ### Deployment Split
 
-The system is split across two environments:
+The system is split across two environments, both driven from the local Mac terminal:
 
 | Environment | Components | Why |
 |---|---|---|
-| Google Colab Pro (A100 GPU) | `remote_inference.ipynb`, `StimulusRunner` | TRIBE v2 requires a GPU. Colab Pro (available via student plan) provides an A100, reducing inference time to ~5 minutes for the full IBC corpus. Colab's job is purely inference — run TRIBE v2, save raw tensors. |
-| Local Mac | `TemporalCollapser`, `ResponseCache`, `SimilarityEngine`, `ICANetworkAtlas`, `CognitiveSimilarity`, `ValidationSuite`, `DemoNotebook` | All analysis logic runs locally. Collapsing is done locally so the strategy can be changed without re-running Colab. |
+| Modal A100 worker | `scripts/run_inference_modal.py`, `StimulusRunner`, stimulus preprocessing (ffmpeg) | TRIBE v2 requires a GPU. Modal provisions an A100 container on demand, runs unattended from the local terminal (no browser session to keep alive), and persists results to the `cogsim-cache` Modal Volume. Idempotent: re-running skips already-cached stimuli via content-hash lookup. |
+| Local Mac | `TemporalCollapser`, `ResponseCache`, `SimilarityEngine`, `ICANetworkAtlas`, `CognitiveSimilarity`, `ValidationSuite`, `scripts/validate_ibc.py` | All analysis logic runs locally. Collapsing is done locally so the strategy can be changed without re-running inference. |
 
-The boundary between the two is the Google Drive cache directory. Once raw tensors are cached, all similarity computation runs entirely locally with no GPU needed.
+The boundary is the Modal Volume `cogsim-cache`. `modal run ... --download-to <local_cache>` mirrors the Volume to a local directory so downstream validation can read from it like any other cache.
 
 ### Component Responsibilities
 
 | Component | Environment | Responsibility |
 |---|---|---|
-| `remote_inference.ipynb` | Colab | Clones repo, downloads IBC stimuli, runs TRIBE v2 inference, saves raw tensors to Google Drive with resume-from-checkpoint |
-| `StimulusRunner` | Colab | Calls TRIBE v2 API per stimulus, returns raw `Brain_Response` (cortical only; subcortical checkpoint not publicly released) |
+| `scripts/run_inference_modal.py` | Local driver + Modal container | Defines the Modal App/Image, the `TribeWorker` class (@enter loads model, @method `infer_one` preprocesses + infers + commits), and the `@app.local_entrypoint` that farms exemplars to the worker |
+| `scripts/ibc_exemplars.py` | Local (imported by driver and validator) | Single source of truth: 23 exemplars covering the 9 validation checks, with preprocessing `src_kind` dispatch hints |
+| `StimulusRunner` | Modal container | Thin wrapper around `TribeModel.predict`; returns `(T, 20484)` cortical response |
 | `TemporalCollapser` | Local | Reduces cortical `[T, 20,484]` → `[20,484]` via peak (≤10s) or GLM+HRF (>10s); result cached locally alongside raw tensors |
-| `ResponseCache` | Both | Colab writes raw tensors; local reads raw tensors and writes/reads collapsed responses |
-| `ICANetworkAtlas` | Local | Loads and exposes the five ICA network vertex masks (~2,048 vertices each) from HuggingFace |
+| `ResponseCache` | Both | Modal writes raw tensors; local reads raw tensors and writes/reads collapsed responses |
+| `ICANetworkAtlas` | Local | Loads and exposes the five ICA network vertex masks (~2,048 vertices each) from HuggingFace (`best.ckpt`'s `model.predictor.weights`, squeezed) |
 | `SimilarityEngine` | Local | Computes per-network Pearson correlation, whole-cortex score, ranked lists |
 | `CognitiveSimilarity` | Local | Top-level facade: orchestrates all components, exposes public API |
 | `ValidationSuite` | Local | Runs 9 expected-ordering checks against cached IBC tensors |
-| `DemoNotebook` | Local | Interactive Jupyter notebook for exploring the system |
+| `demo.ipynb` | Local | Interactive Jupyter notebook for exploring the system on synthetic data |
 
 ---
 
@@ -111,76 +111,85 @@ class CognitiveSimilarity:
     ) -> np.ndarray: ...  # shape [20,484]
 ```
 
-### `remote_inference.ipynb` (Google Colab)
+### `scripts/run_inference_modal.py` (Modal GPU driver)
 
-This notebook is the entry point for all TRIBE v2 inference. It runs on Google Colab with a GPU runtime and writes results to Google Drive for local use.
+This script is the entry point for all TRIBE v2 inference. It is invoked from the local Mac terminal (`modal run scripts/run_inference_modal.py ...`) and executes on a Modal-provisioned A100 container, writing results to the persistent `cogsim-cache` Modal Volume.
 
-**Notebook structure:**
+**Structure:**
 
 ```
-Cell 1 — Setup
-  - Mount Google Drive
-  - Clone/pull the git repo from GitHub
-  - pip install tribev2 + dependencies
-  - huggingface-cli login (for gated Llama 3.2 access)
+Image
+  - debian_slim(python_version=3.12) + apt ffmpeg, git
+  - pip tribev2 (git+https://github.com/facebookresearch/tribev2.git) first, so
+    it resolves its own numpy==2.2.6 pin
+  - pip nilearn, scikit-learn, pandas, transformers, huggingface-hub
+  - add_local_dir(cognitive_similarity/) and (scripts/) into the container
 
-Cell 2 — Load cortical model
-  - cortical_model = TribeModel.from_pretrained("facebook/tribev2", cache_folder=CACHE_FOLDER)
-  - (No subcortical model: checkpoint not publicly released.)
+TribeWorker (@app.cls, gpu="A100", timeout=20*60, volumes={/cache: cogsim-cache},
+                       secrets=[hf-token])
+  @modal.enter setup()
+    - HF login (reads HF_TOKEN from the hf-token secret)
+    - git clone public_protocols into /ibc_public_protocols
+    - TribeModel.from_pretrained("facebook/tribev2", ...)
 
-Cell 3 — Build IBC stimulus manifest
-  - Clone https://github.com/individual-brain-charting/public_protocols
-  - Pre-convert JPG exemplars to 1s static MP4s via ffmpeg (TRIBE v2 rejects .jpg)
-  - Build stimulus manifest (list of all files to process)
+  @modal.method infer_one(exemplar_dict)
+    - Dispatch preprocessing by src_kind:
+        facebody_jpg  → ffmpeg image → 10 s static MP4
+        biomvt_mp4    → ffmpeg stream-loop → 10 s MP4 with pad filter (handles
+                        the 83×171 odd-width source)
+        wav_padded    → ffmpeg apad=whole_dur=10 to add silence to 10 s
+        synth_silence → ffmpeg anullsrc → 10 s silent WAV
+        text_direct   → write English string to .txt
+    - Content-hash the preprocessed file; skip if raw_cortical.npy already exists
+    - StimulusRunner.run(stim) → (T, 20484) cortical response
+    - np.save raw_cortical.npy under /cache/tensors/<hash>/; VOLUME.commit()
+    - Return manifest entry
 
-Cell 4 — Resume-from-checkpoint inference loop
-  - For each stimulus in manifest:
-      hash = content_hash(stimulus)
-      if (DRIVE_CACHE / "tensors" / hash / "raw_cortical.npy").exists(): continue  # skip
-      cortical_preds, _ = cortical_model.predict(events=df)    # (T, 20484)
-      save raw_cortical.npy to DRIVE_CACHE/tensors/hash/
-  - Print progress: X processed, Y skipped, Z remaining
-  - Note: TemporalCollapser runs locally — Colab only saves raw tensors
+  @modal.method write_manifest(manifest) — persist manifest.json to the Volume
 
-Cell 5 — Verify cache
-  - List all cached stimuli with their shapes and sizes
-  - Confirm all expected stimuli are present
+@app.local_entrypoint main(smoke_only, ids, download_to)
+  - Build exemplar list (all 23 or a subset)
+  - Optionally smoke-test one per modality first
+  - Fire worker.infer_one.remote(...) per exemplar (sequential)
+  - worker.write_manifest.remote(manifest)
+  - Optional: `modal volume get` to mirror Volume → local cache dir
 ```
 
 **Resume-from-checkpoint logic:**
 
-Each stimulus is identified by a SHA-256 hash of its file contents. Before running inference, the notebook checks whether `tensors/<hash>/raw_cortical.npy` already exists in the Google Drive cache directory. If it does, the stimulus is skipped. This means:
-- Colab timeouts are safe — re-running the notebook picks up exactly where it left off
-- Re-running after adding new stimuli only processes the new ones
-- The cache is the single source of truth
+Each stimulus is identified by a SHA-256 hash of its preprocessed file bytes. Before running inference, `infer_one` checks whether `/cache/tensors/<hash>/raw_cortical.npy` already exists on the Modal Volume. If it does, the stimulus is skipped. `VOLUME.commit()` after each successful write ensures progress persists across container restarts. This means:
+- Local-side disconnects (laptop sleep, network drops) don't lose work — the Volume is external to any one run
+- Re-running the same command picks up exactly where it left off
+- `modal run --detach` lets the job finish even without a live local client
 
-**Data volumes:**
-- IBC corpus: ~100-150 images + ~30-40 audio/language clips (no local copies — referenced via GitHub URLs)
-- Raw cortical tensors (Colab writes): ~60 MB total
-- Collapsed tensors (local, generated on first use): ~15 MB total
-- Total cache: ~75 MB — well within Google Drive free 15 GB
-- Estimated inference time on Colab Pro A100: ~5 minutes for full corpus
+**Data volumes (for the 23 validation-required exemplars):**
+- IBC corpus: cloned fresh inside the container at /ibc_public_protocols (no local copy)
+- Preprocessed stimuli (under /cache/stimulus_{videos,audios,texts}/): a few MB
+- Raw cortical tensors (Modal writes): ~18 MB total (23 stimuli × ~0.8 MB each)
+- Collapsed tensors (local, generated on first `validate_ibc.py` call): ~1.8 MB
+- Modal inference wall-clock: ~30–40 s per fresh stimulus on A100
 
-**Google Drive path structure:**
+**Modal Volume layout (`cogsim-cache`):**
 ```
-MyDrive/
-└── cognitive-similarity-cache/
-    ├── manifest.json          # stimulus registry (see below)
-    └── tensors/
-        ├── <sha256_hash_1>/
-        │   └── raw_cortical.npy      # (T, 20484) float32 — written by Colab
-        ├── <sha256_hash_2>/
-        │   └── raw_cortical.npy
-        └── ...
+/cache/
+├── manifest.json               # stimulus registry (written by write_manifest)
+├── stimulus_videos/*.mp4       # preprocessed 10 s MP4s
+├── stimulus_audios/*.wav       # preprocessed 10 s WAVs
+├── stimulus_texts/*.txt        # English text inputs
+├── hf/                         # HuggingFace cache (best.ckpt etc.)
+└── tensors/
+    ├── <sha256_hash_1>/
+    │   └── raw_cortical.npy    # (T, 20484) float32 — written by Modal worker
+    ├── <sha256_hash_2>/
+    │   └── raw_cortical.npy
+    └── ...
 ```
 
-No stimulus files are stored in the cache. Images are fetched on-the-fly from stable `raw.githubusercontent.com` URLs when needed by the demo notebook. GitHub's raw content CDN has generous rate limits — 150 image requests for our full corpus is well within bounds even unauthenticated.
-
-After syncing to local Mac, `ResponseCache` adds `collapsed.npy` on first use:
+After `modal volume get` mirrors this to the local Mac, `ResponseCache` adds `collapsed.npy` on first use:
 ```
 tensors/<sha256_hash_1>/
-├── raw_cortical.npy      # from Colab
-└── collapsed.npy         # generated locally by TemporalCollapser, cached
+├── raw_cortical.npy    # from Modal worker
+└── collapsed.npy       # generated locally by TemporalCollapser, cached
 ```
 
 **`manifest.json` structure:**

@@ -55,13 +55,34 @@ pytest tests/ -v
 rm -rf build/ dist/ *.egg-info __pycache__/ .pytest_cache/
 ```
 
-### End-to-end validation (requires HF access + torch)
+### End-to-end pipeline (runs from the local Mac terminal via Modal)
+
+One-time setup:
 ```bash
-# After syncing the Colab-produced cache to local, run:
-python scripts/validate_ibc.py --cache-dir /path/to/cognitive-similarity-cache
-# Downloads best.ckpt from HuggingFace (~676 MB) on first run,
-# runs FastICA once (cached to <cache>/ica_masks.npz), then evaluates
-# ValidationSuite against the materialized collapsed tensors.
+pip install modal                                          # installs CLI + Python SDK
+modal token new                                            # browser auth
+modal secret create hf-token HF_TOKEN=<your_hf_token>      # gated Llama 3.2 access
+```
+
+Run:
+```bash
+# Smoke test (4 stimuli, one per modality):
+modal run scripts/run_inference_modal.py --smoke-only
+
+# Full batch (23 stimuli) + pull results to local cache:
+modal run scripts/run_inference_modal.py \
+    --download-to /path/to/local/cognitive-similarity-cache
+
+# Long or flaky connection? Detach so the job survives local disconnects:
+modal run --detach scripts/run_inference_modal.py
+# ...then later pull results yourself:
+modal volume get cogsim-cache manifest.json /path/to/local/cache/
+modal volume get cogsim-cache tensors /path/to/local/cache/
+
+# Local analysis + validation (requires torch + hf_hub in whichever venv):
+python scripts/validate_ibc.py --cache-dir /path/to/local/cache
+# First run downloads best.ckpt from HF (~676 MB) and runs FastICA once
+# (cached to <cache>/ica_masks.npz); subsequent runs are fast.
 ```
 
 ## Key Technical Notes
@@ -69,6 +90,6 @@ python scripts/validate_ibc.py --cache-dir /path/to/cognitive-similarity-cache
 - **Cortical response shape**: (n_timesteps, 20484) float32 — only response the public TRIBE v2 checkpoint produces; subcortical variant is not released
 - **Collapsed response shape**: (20484,) float32
 - **ICA projection source**: `model.predictor.weights` in `best.ckpt`, shape `(1, 2048, 20484)` — the leading singleton is the subject axis (S=1 in unseen-subject mode); squeezed to `(2048, 20484)` before FastICA
-- **Stimulus duration**: 10 s per static video for single-stimulus inference (allows TRIBE's output to span the t+5 s hemodynamic peak). 1 s — as used in the paper's streamed protocol — collapses to T=1 locally and loses peak-response information
-- **Cache format**: NumPy `.npy` files per stimulus under `tensors/<content_hash>/` (`raw_cortical.npy` written by Colab, `collapsed.npy` materialized locally)
+- **Stimulus duration**: 10 s per static video/audio for single-stimulus inference (allows TRIBE's output to span the t+5 s hemodynamic peak). 1 s — as used in the paper's streamed protocol — collapses to T=1 locally and loses peak-response information
+- **Cache format**: NumPy `.npy` files per stimulus under `tensors/<content_hash>/` (`raw_cortical.npy` written by Modal worker, `collapsed.npy` materialized locally)
 - **Hypothesis database**: Stored in `.hypothesis/` for test case replay
