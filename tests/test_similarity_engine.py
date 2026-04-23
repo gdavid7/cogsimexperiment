@@ -12,7 +12,11 @@ from hypothesis import strategies as st
 
 from cognitive_similarity.ica_atlas import ICANetworkAtlas, N_VERTICES
 from cognitive_similarity.models import ICAMode, ICANetwork
-from cognitive_similarity.similarity_engine import SimilarityEngine, pearson_correlation
+from cognitive_similarity.similarity_engine import (
+    SimilarityEngine,
+    pearson_correlation,
+    weighted_pearson_correlation,
+)
 
 # ---------------------------------------------------------------------------
 # Shared test fixtures
@@ -346,6 +350,75 @@ def test_pearson_correlation_zero_variance() -> None:
     b = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0], dtype=np.float32)
     assert pearson_correlation(a, b) == 0.0
     assert pearson_correlation(b, a) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# weighted_pearson_correlation (E1 fix)
+# ---------------------------------------------------------------------------
+
+def test_weighted_pearson_uniform_weights_matches_plain_pearson() -> None:
+    """With uniform weights the weighted Pearson collapses exactly to the
+    standard Pearson correlation — proves it's a valid generalization.
+    """
+    rng = np.random.default_rng(0)
+    a = rng.standard_normal(200).astype(np.float32)
+    b = 0.3 * a + rng.standard_normal(200).astype(np.float32)
+    uniform = np.ones_like(a)
+    assert weighted_pearson_correlation(a, b, uniform) == pytest.approx(
+        pearson_correlation(a, b), abs=1e-6
+    )
+
+
+def test_weighted_pearson_identical_vectors_r_one() -> None:
+    """r(a, a) = 1.0 regardless of the weight distribution."""
+    rng = np.random.default_rng(1)
+    a = rng.standard_normal(100).astype(np.float32)
+    w = rng.uniform(0.1, 2.0, 100).astype(np.float32)
+    assert weighted_pearson_correlation(a, a, w) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_weighted_pearson_antisymmetric() -> None:
+    """r(a, -a) = -1.0 regardless of the weight distribution."""
+    rng = np.random.default_rng(2)
+    a = rng.standard_normal(100).astype(np.float32)
+    w = rng.uniform(0.1, 2.0, 100).astype(np.float32)
+    assert weighted_pearson_correlation(a, -a, w) == pytest.approx(-1.0, abs=1e-6)
+
+
+def test_weighted_pearson_concentrates_on_high_weight_region() -> None:
+    """When weight is near-zero everywhere except a small region, the
+    weighted Pearson must approximate the plain Pearson over that region.
+    """
+    rng = np.random.default_rng(3)
+    a = rng.standard_normal(200).astype(np.float32)
+    b = rng.standard_normal(200).astype(np.float32)  # uncorrelated overall
+
+    # Force high correlation in the last 20 points only
+    b[-20:] = a[-20:]
+
+    w = np.full(200, 1e-6, dtype=np.float32)
+    w[-20:] = 1.0  # effectively only the high-corr slice matters
+
+    r_weighted = weighted_pearson_correlation(a, b, w)
+    r_plain_on_slice = pearson_correlation(a[-20:], b[-20:])
+    assert r_weighted == pytest.approx(r_plain_on_slice, abs=1e-3)
+
+
+def test_weighted_pearson_zero_variance_returns_zero() -> None:
+    """Constant input under the weight distribution → score 0.0."""
+    a = np.ones(50, dtype=np.float32)
+    b = np.arange(50, dtype=np.float32)
+    w = np.ones(50, dtype=np.float32)
+    assert weighted_pearson_correlation(a, b, w) == 0.0
+    assert weighted_pearson_correlation(b, a, w) == 0.0
+
+
+def test_weighted_pearson_rejects_zero_weights() -> None:
+    """All-zero weight vector has no positive sum — must raise."""
+    a = np.arange(10, dtype=np.float32)
+    b = np.arange(10, dtype=np.float32)
+    with pytest.raises(ValueError, match="positive sum"):
+        weighted_pearson_correlation(a, b, np.zeros_like(a))
 
 
 def test_ica_mode_override_in_compute_profile(atlas: ICANetworkAtlas) -> None:

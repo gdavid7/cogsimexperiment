@@ -37,6 +37,58 @@ def pearson_correlation(a: np.ndarray, b: np.ndarray) -> float:
     return max(-1.0, min(1.0, raw))
 
 
+def weighted_pearson_correlation(
+    a: np.ndarray, b: np.ndarray, w: np.ndarray
+) -> float:
+    """Weighted Pearson correlation across same-length vectors.
+
+    Uses the standard weighted-mean + weighted-covariance formulation:
+
+        a_wm = Σᵢ wᵢ aᵢ   (weights already normalized to sum to 1)
+        b_wm = Σᵢ wᵢ bᵢ
+        numer = Σᵢ wᵢ (aᵢ - a_wm)(bᵢ - b_wm)
+        denom = √(Σᵢ wᵢ (aᵢ - a_wm)²  ·  Σᵢ wᵢ (bᵢ - b_wm)²)
+        r     = numer / denom
+
+    With uniform weights (wᵢ = 1/N) this reduces exactly to the
+    standard Pearson correlation — hence valid as a drop-in
+    generalization. This differs from the earlier
+    "``sqrt(w) * a`` then plain Pearson" heuristic, which centered
+    by the unweighted mean and did not compute a weighted covariance.
+
+    Parameters
+    ----------
+    a, b:
+        Same-length 1-D arrays.
+    w:
+        Same-length non-negative weights. May be unnormalized;
+        will be normalized to sum to 1 internally. Must not be
+        all-zero.
+
+    Returns
+    -------
+    Pearson r in [-1, 1]. Returns 0.0 when either vector has
+    zero weighted variance (analogue of zero-variance in the
+    unweighted case).
+    """
+    w = np.asarray(w, dtype=np.float64)
+    w_sum = w.sum()
+    if w_sum <= 0.0:
+        raise ValueError("Weights must have a positive sum.")
+    w = w / w_sum
+    a_wm = np.sum(w * a)
+    b_wm = np.sum(w * b)
+    a_c = a - a_wm
+    b_c = b - b_wm
+    var_a = np.sum(w * a_c * a_c)
+    var_b = np.sum(w * b_c * b_c)
+    if var_a <= 0.0 or var_b <= 0.0:
+        return 0.0
+    cov = np.sum(w * a_c * b_c)
+    raw = float(cov / np.sqrt(var_a * var_b))
+    return max(-1.0, min(1.0, raw))
+
+
 class SimilarityEngine:
     """Computes per-network and whole-cortex cognitive similarity scores."""
 
@@ -88,13 +140,10 @@ class SimilarityEngine:
             b_masked = response_b[indices]
             return pearson_correlation(a_masked, b_masked)
         else:
-            # CONTINUOUS_WEIGHTS
+            # CONTINUOUS_WEIGHTS — use proper weighted Pearson (E1 fix)
             component = self._atlas.get_component(network)
             w = np.abs(component)
-            w = w / w.sum()
-            a_w = response_a * np.sqrt(w)
-            b_w = response_b * np.sqrt(w)
-            return pearson_correlation(a_w, b_w)
+            return weighted_pearson_correlation(response_a, response_b, w)
 
     def compute_profile(
         self,
@@ -141,24 +190,27 @@ class SimilarityEngine:
                 score = pearson_correlation(a_masked, b_masked)
 
             else:
-                # CONTINUOUS_WEIGHTS — vertex_count is all 20484
+                # CONTINUOUS_WEIGHTS — weighted Pearson over all 20484 (E1 fix)
                 component = self._atlas.get_component(network)
                 w = np.abs(component)
-                w = w / w.sum()
-                a_w = response_a * np.sqrt(w)
-                b_w = response_b * np.sqrt(w)
                 vertex_count = len(component)
 
-                a_c = a_w - a_w.mean()
-                b_c = b_w - b_w.mean()
-                if np.linalg.norm(a_c) == 0.0 or np.linalg.norm(b_c) == 0.0:
+                # Zero-variance under the weight distribution: weighted
+                # mean-centered norm is zero. Same semantics as the
+                # unweighted zero-variance guard, but respects the weights.
+                w_norm = w / w.sum() if w.sum() > 0 else w
+                a_wm = float(np.sum(w_norm * response_a))
+                b_wm = float(np.sum(w_norm * response_b))
+                var_a = float(np.sum(w_norm * (response_a - a_wm) ** 2))
+                var_b = float(np.sum(w_norm * (response_b - b_wm) ** 2))
+                if var_a <= 0.0 or var_b <= 0.0:
                     warning = "zero variance"
                     log.warning(
                         "Zero-variance input for network %s (continuous mode); returning 0.0",
                         network.value,
                     )
 
-                score = pearson_correlation(a_w, b_w)
+                score = weighted_pearson_correlation(response_a, response_b, w)
 
             network_scores[network] = NetworkScore(
                 network=network,
