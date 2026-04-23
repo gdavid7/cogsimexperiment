@@ -44,7 +44,23 @@ class ValidationSuite:
     # ------------------------------------------------------------------
 
     def run(self) -> ValidationReport:
-        """Run all 9 validation checks and return a ValidationReport."""
+        """Run the 6 surviving validation checks and return a ValidationReport.
+
+        Six pairwise-similarity orderings (Slice 3 B3a pruning):
+          - Visual System ×4 (face/place/body/word selectivity, §2.5 Fig 4E)
+          - Primary Auditory ×1 (speech > non-speech, §2.6 Fig 5B)
+          - Language Network ×1 (sentence > word list, §2.6 Fig 5B)
+
+        Three checks from the original 9 were dropped:
+          * audio_segment > silence (B3a): silence-vs-clean-sound pairwise
+            is noisy and not a paper §5.9 construction.
+          * complex > simple (B3a): paper's Broca finding is a magnitude
+            contrast; translating to pairwise similarity requires
+            unstated assumptions.
+          * motion_video > static_image (Group C2): MT+ has no 1-s
+            in-silico protocol in the paper; its cognitive axis is
+            validated indirectly by NeuroSynth-based mask labeling.
+        """
         manifest = self._load_manifest()
         # Build lookup: stimulus_id -> content_hash
         id_to_hash: dict[str, str] = {
@@ -84,7 +100,7 @@ class ValidationSuite:
             id_to_hash=id_to_hash,
         ))
 
-        # --- Primary Auditory Cortex (2 checks) ---
+        # --- Primary Auditory Cortex (1 check) ---
         checks.append(self._check(
             description="sim(speech, speech) > sim(speech, non_speech)",
             network=ICANetwork.PRIMARY_AUDITORY_CORTEX,
@@ -92,36 +108,13 @@ class ValidationSuite:
             pair_b_ids=("speech_01", "non_speech_01"),
             id_to_hash=id_to_hash,
         ))
-        checks.append(self._check(
-            description="sim(audio_segment, audio_segment) > sim(audio_segment, silence)",
-            network=ICANetwork.PRIMARY_AUDITORY_CORTEX,
-            pair_a_ids=("audio_segment_01", "audio_segment_02"),
-            pair_b_ids=("audio_segment_01", "silence_01"),
-            id_to_hash=id_to_hash,
-        ))
 
-        # --- Language Network (2 checks) ---
+        # --- Language Network (1 check) ---
         checks.append(self._check(
             description="sim(sentence, sentence) > sim(sentence, word_list)",
             network=ICANetwork.LANGUAGE_NETWORK,
             pair_a_ids=("sentence_01", "sentence_02"),
             pair_b_ids=("sentence_01", "word_list_01"),
-            id_to_hash=id_to_hash,
-        ))
-        checks.append(self._check(
-            description="sim(complex_sentence, complex_sentence) > sim(complex_sentence, simple_sentence)",
-            network=ICANetwork.LANGUAGE_NETWORK,
-            pair_a_ids=("complex_sentence_01", "complex_sentence_02"),
-            pair_b_ids=("complex_sentence_01", "simple_sentence_01"),
-            id_to_hash=id_to_hash,
-        ))
-
-        # --- Motion Detection MT+ (1 check) ---
-        checks.append(self._check(
-            description="sim(motion_video, motion_video) > sim(motion_video, static_image)",
-            network=ICANetwork.MOTION_DETECTION_MT_PLUS,
-            pair_a_ids=("motion_video_01", "motion_video_02"),
-            pair_b_ids=("motion_video_01", "static_image_01"),
             id_to_hash=id_to_hash,
         ))
 

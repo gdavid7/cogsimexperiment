@@ -47,17 +47,25 @@ _N_VERTICES = 20484
 def _stimulus_from_manifest(entry: dict) -> Stimulus:
     """Build a minimal Stimulus for local collapsing.
 
-    Only stimulus_id is populated; modality path fields stay None on
-    purpose. TemporalCollapser.collapse (collapsing.py) reads only
-    stimulus.duration_s — which is inferred from T when None — so no
-    file path is needed to collapse the cached raw_cortical.npy.
+    Only stimulus_id and duration_s are populated; modality path fields
+    stay None on purpose. TemporalCollapser.collapse reads only
+    stimulus.duration_s — which the Modal worker now records explicitly
+    in the manifest (Slice 3 C3, default 8.0 s per §5.9) — so no file
+    path is needed to collapse the cached raw_cortical.npy.
 
     Previous revisions filled entry["local_path"], which is the Modal
-    container path (e.g. /cache/stimulus_videos/foo.mp4) and does not
-    exist on the local Mac; any code that hashed that path would have
-    died with FileNotFoundError. G3(a) removes that dormant hazard.
+    container path and does not exist on the local Mac; any code that
+    hashed that path would have died with FileNotFoundError. G3(a)
+    removes that dormant hazard.
+
+    Falls back to duration_s=None (inferred from T*tr_s) when the
+    manifest is pre-C3 and doesn't carry duration; TemporalCollapser
+    handles None correctly.
     """
-    return Stimulus(stimulus_id=entry["stimulus_id"])
+    return Stimulus(
+        stimulus_id=entry["stimulus_id"],
+        duration_s=entry.get("duration_s"),
+    )
 
 
 def _materialize_collapsed(cache_dir: Path, manifest: list[dict]) -> None:

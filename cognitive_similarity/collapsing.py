@@ -45,6 +45,13 @@ class TemporalCollapser:
     # ------------------------------------------------------------------
 
     def _peak(self, cortical_response: np.ndarray, tr_s: float) -> np.ndarray:
+        # Implicit assumption: stimulus onset is at file-time t=0, so the
+        # predicted hemodynamic peak sits at index round(5/tr_s). This is
+        # true by construction for our Modal preprocessing pipeline
+        # (run_inference_modal._preprocess_stimulus), which writes each
+        # stimulus starting at t=0 of its 8 s file. If you ever feed this
+        # collapser responses predicted from a file with non-zero onset
+        # (e.g., a stimulus embedded mid-stream), this index will be wrong.
         T = cortical_response.shape[0]
         peak_idx = round(_PEAK_OFFSET_S / tr_s)
         if peak_idx >= T:

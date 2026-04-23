@@ -194,6 +194,10 @@ class TribeWorker:
             "content_hash": content_hash,
             "tensor_dir": f"tensors/{content_hash}",
             "ibc_source": ex.source_path if ex.source_path else "(synthesized)",
+            # Slice 3 C3: record the stimulus file duration so the local
+            # collapser can dispatch peak-vs-GLM without inferring from T
+            # alone. Paper §5.9: 1 s of stimulus + 7 s blank = 8 s total.
+            "duration_s": 8.0,
         }
 
         if cortical_path.exists():
@@ -233,6 +237,16 @@ class TribeWorker:
 def _preprocess_stimulus(ex: Exemplar, cache_root: str, ibc_root: str) -> Path:
     """Produce the file TRIBE v2 will read, under cache_root/stimulus_{videos,audios,texts}/.
 
+    Per TRIBEv2.pdf §5.9 the in-silico protocol presents images "for one
+    second every eight seconds" and audio segments with "8 seconds between
+    each segment". For our single-stimulus pipeline we reproduce that trial
+    structure exactly: 1 s of stimulus followed by 7 s of blank padding,
+    total 8 s. TRIBE outputs at 1 Hz so the resulting T=8 timepoints let
+    TemporalCollapser index cortical_response[5] — the §5.8 / Fig 4A
+    hemodynamic peak — and the stimulus is a true 1-s onset transient,
+    not a 10-s sustained input (which would be a different quantity than
+    the paper validates).
+
     Cached across calls — if the output file already exists, short-circuits.
     ffmpeg parameters (fps=10, libx264, yuv420p, no audio) mirror
     tribev2.eventstransforms.CreateVideosFromImages defaults so the encoded
@@ -243,26 +257,12 @@ def _preprocess_stimulus(ex: Exemplar, cache_root: str, ibc_root: str) -> Path:
         out = cache / "stimulus_videos" / f"{ex.stimulus_id}.mp4"
         if not out.exists():
             src = Path(ibc_root) / ex.source_path
+            # 1 s of image (input-side -t 1 limits the looped still) + 7 s of
+            # black frames via tpad(stop_mode=add), clipped to 8 s exactly.
             _run_ffmpeg(
-                ["ffmpeg", "-loop", "1", "-i", str(src),
-                 "-t", "10", "-r", "10",
-                 "-c:v", "libx264", "-pix_fmt", "yuv420p", "-an",
-                 "-y", "-loglevel", "error", str(out)],
-                out,
-            )
-        return out
-
-    if ex.src_kind == "biomvt_mp4":
-        out = cache / "stimulus_videos" / f"{ex.stimulus_id}.mp4"
-        if not out.exists():
-            src = Path(ibc_root) / ex.source_path
-            # Loop the input (5.9 s) to fill 10 s exactly. libx264 + yuv420p
-            # need even width/height (chroma subsampling), but the BioMvt
-            # clips are 83×171 — pad to the next even size with black.
-            _run_ffmpeg(
-                ["ffmpeg", "-stream_loop", "-1", "-i", str(src),
-                 "-t", "10", "-r", "10",
-                 "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+                ["ffmpeg", "-loop", "1", "-t", "1", "-i", str(src),
+                 "-vf", "tpad=stop_duration=7:stop_mode=add:color=black",
+                 "-r", "10", "-t", "8",
                  "-c:v", "libx264", "-pix_fmt", "yuv420p", "-an",
                  "-y", "-loglevel", "error", str(out)],
                 out,
@@ -273,29 +273,16 @@ def _preprocess_stimulus(ex: Exemplar, cache_root: str, ibc_root: str) -> Path:
         out = cache / "stimulus_audios" / f"{ex.stimulus_id}.wav"
         if not out.exists():
             src = Path(ibc_root) / ex.source_path
-            # Loop the 1 s IBC realistic_sounds WAV to fill 10 s. Earlier we
-            # used apad=whole_dur=10 (silence-pad); that gave TRIBE 9 s of
-            # silence dominating the response, which made audio stimuli
-            # correlate MORE with pure silence than with each other
-            # (validation check audio_segment > silence failed with 0.75 < 0.91).
-            # Looping gives continuous auditory content, matching the trick
-            # we already use for BioMvt 5.9 s clips.
+            # Keep the ~1 s IBC realistic_sounds WAV, pad with silence to 8 s
+            # total via apad(whole_dur=8). The prior 10 s looped-tail design
+            # gave TRIBE sustained auditory input; the §5.9 protocol is a
+            # 1 s onset, so we revert to silence-padding. Peak extraction
+            # at t=5 samples the response to the 1 s onset (hemodynamic
+            # peak per §5.8), so the silence tail doesn't dominate.
             _run_ffmpeg(
-                ["ffmpeg", "-stream_loop", "-1", "-i", str(src),
-                 "-t", "10",
+                ["ffmpeg", "-i", str(src),
+                 "-af", "apad=whole_dur=8",
                  "-ar", "16000", "-ac", "1",
-                 "-y", "-loglevel", "error", str(out)],
-                out,
-            )
-        return out
-
-    if ex.src_kind == "synth_silence":
-        out = cache / "stimulus_audios" / f"{ex.stimulus_id}.wav"
-        if not out.exists():
-            _run_ffmpeg(
-                ["ffmpeg", "-f", "lavfi",
-                 "-i", "anullsrc=r=16000:cl=mono",
-                 "-t", "10",
                  "-y", "-loglevel", "error", str(out)],
                 out,
             )
